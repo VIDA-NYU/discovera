@@ -6,7 +6,7 @@ First, add your OpenAI API key to the environment:
 export OPENAI_API_KEY=your key goes here
 ```
 
-Then use `docker compose` to build and run the BDIKit Beaker context:
+Then use `docker compose` to build and run the BKDKit Beaker context:
 
 ```
 docker compose build
