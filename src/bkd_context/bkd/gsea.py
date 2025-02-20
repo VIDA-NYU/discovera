@@ -3,15 +3,15 @@ import gseapy as gp
 
 def rank_gsea(
         df, 
-        gene_sets, 
-        hit_col='hit',
-        corr_col='corr',
-        top_n=50,
-        min_size=5, 
-        max_size=2000
+        gene_sets
         ):
     
     # Sort the correlation column by its absolute value
+    hit_col="hit"
+    corr_col="corr"
+    top_n=50
+    min_size=5 
+    max_size=2000
     df['rank'] = df[corr_col].abs()
     df_sorted = df.sort_values(by='rank', ascending=False)
 
