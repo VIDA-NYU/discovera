@@ -1,35 +1,29 @@
 import gseapy as gp
-
+import pandas as pd
 
 def rank_gsea(
-        df, 
-        gene_sets
+        dataset, 
+        gene_sets,
+        hit_col,
+        corr_col,
+        min_size, 
+        max_size
         ):
-    
-    # Sort the correlation column by its absolute value
-    hit_col="hit"
-    corr_col="corr"
-    top_n=50
-    min_size=5 
-    max_size=2000
-    df['rank'] = df[corr_col].abs()
-    df_sorted = df.sort_values(by='rank', ascending=False)
 
-    df_sorted = df_sorted.drop(columns=['rank'])
+    dataset['rank'] = dataset[corr_col].abs()
+    data_sorted = dataset.sort_values(by='rank', ascending=False)
+
+    data_sorted = data_sorted.drop(columns=[corr_col])
 
     # Reset the index and drop the old index
-    df_sorted.reset_index(drop=True, inplace=True)
+    data_sorted.reset_index(drop=True, inplace=True)
 
     # Ensure the correct columns remain
-    rnk_df = df_sorted[[hit_col, corr_col]]
-    rnk_df[corr_col] = rnk_df[corr_col].astype(float)
-
-    # Select top N rows
-    rnk_df = rnk_df.head(top_n)
+    rnk_data = data_sorted[[hit_col, 'rank']]
 
     # Perform the prerank analysis
     results = gp.prerank(
-        rnk=rnk_df,
+        rnk=rnk_data,
         gene_sets=gene_sets,
         min_size=min_size,
         max_size=max_size,
@@ -37,4 +31,4 @@ def rank_gsea(
         verbose=True
     )
     
-    return results.res2d
+    return pd.DataFrame(results.res2d)
