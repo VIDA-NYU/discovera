@@ -3,10 +3,8 @@ import src.bkd_context.bkd.gsea
 from src.bkd_context.bkd.gsea import rank_gsea
 
 
-
-gene_pair_edges = rank_gsea({{ dataset }}, gene_sets={{ gene_sets }}, hit_col={{ hit_col }}, corr_col={{ corr_col }}, min_size={{ min_size }}, max_size={{ max_size }})
-gene_pair_edges.to_markdown()
-#df = pd.read_("gene_expression.xlsx")
+leading_genes = rank_gsea({{ dataset }}, gene_sets={{ gene_sets }}, hit_col="{{ hit_col }}", corr_col="{{ corr_col }}", min_size={{ min_size }}, max_size={{ max_size }})
+leading_genes.to_markdown()
 
 
 # automating the reliability check,

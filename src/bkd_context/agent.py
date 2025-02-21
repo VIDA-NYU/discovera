@@ -88,11 +88,10 @@ class BKDAgent(BeakerAgent):
         Args:
             dataset (str): The name of the dataset variable stored in the agent.
             gene_sets (str): Multi-libraries names supported, separate each name by comma or input a list.
-            hit_col (str): Multi-libraries names supported, separate each name by comma or input a list.
-            corr_col (str): Multi-libraries names supported, separate each name by comma or input a list.
-            min_size (int): Multi-libraries names supported, separate each name by comma or input a list.
-            max_size (int): Multi-libraries names supported, separate each name by comma or input a list.
-
+            hit_col (str): Column with name of genes.
+            corr_col (str): Column with ranks.
+            min_size (int): 
+            max_size (int): 
         Returns:
             str: Analysis results.
         """
