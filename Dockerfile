@@ -7,6 +7,15 @@ RUN apt update && apt install -y lsof
 # Install Python requirements
 RUN pip install --upgrade --no-cache-dir hatch pip
 
+# Install JupyterLab and necessary extensions
+# RUN pip install jupyterlab jupyter_contrib_nbextensions vega3
+
+# Create Jupyter configuration file
+#RUN mkdir -p /home/jupyter/.jupyter
+#RUN echo "c.NotebookApp.trust_xheaders = True" >> /home/jupyter/.jupyter/jupyter_notebook_config.py
+#RUN echo "c.NotebookApp.allow_origin = '*'" >> /home/jupyter/.jupyter/jupyter_notebook_config.py
+#RUN echo "c.NotebookApp.disable_check_xsrf = True" >> /home/jupyter/.jupyter/jupyter_notebook_config.py
+
 COPY --chown=1000:1000 . /jupyter/
 RUN chown -R 1000:1000 /jupyter
 RUN pip install -e /jupyter

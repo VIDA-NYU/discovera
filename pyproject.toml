@@ -23,8 +23,18 @@ classifiers = [
 ]
 dependencies = [
   "beaker_kernel~=1.6.2",
-  "indra"
-]
+  "indra",
+  "altair",
+  "gseapy",
+  "tabulate",
+  "vega",
+  "ipywidgets",
+  "jupyterlab",
+  "jupyter_contrib_nbextensions",
+  "vega3",
+  "notebook",  # Added for rendering HTML
+
+  ]
 
 [project.urls]
 Documentation = "https://github.com/unknown/beaker-buildtest#readme"

@@ -1,7 +1,8 @@
 from archytas.tool_utils import AgentRef, LoopControllerRef, is_tool, tool, toolset
 from beaker_kernel.lib.agent import BeakerAgent
 from beaker_kernel.lib.context import BeakerContext
-
+import pandas as pd
+from typing import Optional
 
 class BKDAgent(BeakerAgent):
     """
@@ -56,6 +57,7 @@ class BKDAgent(BeakerAgent):
         code = agent.context.get_code(
             "multi_hop_query",
             {
+
                 "gene_pair": gene_pair,
             },
         )
@@ -67,30 +69,61 @@ class BKDAgent(BeakerAgent):
         result = result.get("return")
 
         return result
-    
-    @tool()
-    async def run_gsea(self, dataset: str, gene_sets: str, agent: AgentRef) -> str:
-        """
-        Run Gene Set Enrichment Analysis (GSEA).
 
+
+    @tool()
+    async def run_gsea(
+        self, 
+        dataset: str,  # This is the variable name, not the actual data
+        gene_sets: str,
+        hit_col: str,
+        corr_col: str,
+        min_size: int,
+        max_size: int,
+        agent: AgentRef
+    ) -> str:
+        """
+        Performs Gene Set Enrichment Analysis (GSEA) using a dataset stored in the agent's memory.
+        This dataset is usually gene expression data ranked. 
         Args:
-            dataset (str): The dataset to analyze.
-            gene_sets (list): A list of gene sets.
+            dataset (str): The name of the dataset variable stored in the agent.
+            gene_sets (str): Multi-libraries names supported, separate each name by comma or input a list.
+            hit_col (str): Multi-libraries names supported, separate each name by comma or input a list.
+            corr_col (str): Multi-libraries names supported, separate each name by comma or input a list.
+            min_size (int): Multi-libraries names supported, separate each name by comma or input a list.
+            max_size (int): Multi-libraries names supported, separate each name by comma or input a list.
 
         Returns:
             str: Analysis results.
         """
+        # Set default gene sets if not provided
+        gene_sets = ["KEGG_2016", "GO_Biological_Process_2023", "Reactome_Pathways_2024", "MSigDB_Hallmark_2020"]
+        hit_col = "hit"
+        corr_col = "corr"
+        min_size = 5
+        max_size = 2000
+        #if not gene_sets:  
+        #    gene_sets = default_gene_sets  # Use default values
+
+        # Generate the code execution context
         code = agent.context.get_code(
             "run_gsea",
-            {   "dataset": dataset,
+            {
+                "dataset": dataset, 
                 "gene_sets": gene_sets,
+                "hit_col": hit_col,
+                "corr_col": corr_col,
+                "min_size": min_size,
+                "max_size": max_size,
             },
         )
+
+        # Evaluate the code asynchronously
         result = await agent.context.evaluate(
             code,
             parent_header={},
         )
 
         result = result.get("return")
-
-        return result
+        
+        return result  # Return the processed results
