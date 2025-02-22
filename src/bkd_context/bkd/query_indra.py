@@ -249,3 +249,11 @@ def query_bulk_pairs(pairs):
         results.append({"source": source, "target": target, "response": result})
     return results
 
+
+def excerpts(results):
+    results = pd.concat(results['edges'].values, axis=0, ignore_index=True)
+    return results
+
+def relationships(results):
+    results = pd.concat(results['edge_types'].values, axis=0, ignore_index=True)
+    return results
