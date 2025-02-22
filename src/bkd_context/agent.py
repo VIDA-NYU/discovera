@@ -125,4 +125,66 @@ class BKDAgent(BeakerAgent):
 
         result = result.get("return")
         
-        return result  # Return the processed results
+        return result 
+
+    @tool()
+    async def excerpt_extract(
+        self, 
+        dataset:str,
+        agent: AgentRef
+    ) -> str:
+        """
+        Extract excerpt where documented evidence/relationships was mentioned
+        Args:
+            dataset (str): The name of the dataset variable stored in the agent.
+        Returns:
+            str: Analysis results.
+        """
+        # Generate the code execution context
+        code = agent.context.get_code(
+            "excerpt_extract",
+            {
+                "dataset": dataset
+            },
+        )
+
+        # Evaluate the code asynchronously
+        result = await agent.context.evaluate(
+            code,
+            parent_header={},
+        )
+
+        result = result.get("return")
+        
+        return result
+
+    
+    async def relationships(
+        self, 
+        dataset:str,
+        agent: AgentRef
+    ) -> str:
+        """
+        Summarize type of relationships documented
+        Args:
+            dataset (str): The name of the dataset variable stored in the agent.
+        Returns:
+            str: Analysis results.
+        """
+        # Generate the code execution context
+        code = agent.context.get_code(
+            "relationships",
+            {
+                "dataset": dataset
+            },
+        )
+
+        # Evaluate the code asynchronously
+        result = await agent.context.evaluate(
+            code,
+            parent_header={},
+        )
+
+        result = result.get("return")
+        
+        return result
