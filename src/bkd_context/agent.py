@@ -13,9 +13,6 @@ class BKDAgent(BeakerAgent):
     async def query_gene_pair(self, gene_pair: list, agent: AgentRef) -> str:
         """
         Queries the Indra database for relationships between a pair of genes.
-
-        This function retrieves known interactions between two specified genes from the Indra database.
-
         Args:
             gene_pair (list[str]): A list containing exactly two gene names to query, e.g., ["CTNNB1", "CDH1"].
 
@@ -130,13 +127,13 @@ class BKDAgent(BeakerAgent):
     @tool()
     async def excerpt_extract(
         self, 
-        dataset:str,
+        gene_pair: list,
         agent: AgentRef
     ) -> str:
         """
-        Extract excerpt where documented evidence/relationships was mentioned
+        Extract excerpt where documented evidence/relationships were mentioned. 
         Args:
-            dataset (str): The name of the dataset variable stored in the agent.
+            gene_pair (list): The name of the dataset variable stored in the agent.
         Returns:
             str: Analysis results.
         """
@@ -144,7 +141,7 @@ class BKDAgent(BeakerAgent):
         code = agent.context.get_code(
             "excerpt_extract",
             {
-                "dataset": dataset
+                "gene_pair": gene_pair
             },
         )
 
@@ -161,13 +158,13 @@ class BKDAgent(BeakerAgent):
     
     async def relationships(
         self, 
-        dataset:str,
+        gene_pair: list,
         agent: AgentRef
     ) -> str:
         """
-        Summarize type of relationships documented
+        Summarize types and number of relationships documented between a pair of genes.
         Args:
-            dataset (str): The name of the dataset variable stored in the agent.
+            gene_pair (list): The name of the dataset variable stored in the agent.
         Returns:
             str: Analysis results.
         """
@@ -175,7 +172,7 @@ class BKDAgent(BeakerAgent):
         code = agent.context.get_code(
             "relationships",
             {
-                "dataset": dataset
+                "dataset": gene_pair
             },
         )
 

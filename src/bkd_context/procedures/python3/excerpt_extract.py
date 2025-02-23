@@ -7,4 +7,5 @@ from src.bkd_context.bkd.query_indra import excerpts
 # ]
 # nodes_lists
 
-text = excerpts({{ results }})
+text = excerpts([{{ gene_pair }}])
+text.to_markdown()
