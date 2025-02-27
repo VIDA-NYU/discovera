@@ -1,16 +1,33 @@
 import pandas as pd
-import json
 import time
 import requests
-import json
 
 from pandas import json_normalize
 from indra.sources.indra_db_rest.api import get_statements
 from tqdm import tqdm
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 
 
 def retry_on_failure(func, max_retries=3, wait_time=5, **kwargs):
+    """
+    Retry a function call upon failure, with exponential backoff.
+
+    This function retries the execution of the given function up to the specified
+    maximum number of retries. If the function fails with a "502 Bad Gateway"
+    error, it will retry with an increasing wait time between attempts.
+
+    Args:
+        func (callable): The function to be executed.
+        max_retries (int, optional): Maximum number of retry attempts. Defaults to 3.
+        wait_time (int, optional): Initial wait time (in seconds) between retries. Defaults to 5.
+        **kwargs: Additional keyword arguments passed to the function.
+
+    Returns:
+        The return value of the function on success.
+
+    Raises:
+        Exception: If the function fails after the maximum number of retries.
+    """
     for attempt in range(max_retries):
         try:
             return func(**kwargs)
@@ -43,16 +60,20 @@ def expand_and_flatten(state_json):
 
     return expanded_df
 
+
 def extract_relations(statements):
     """
-    This function takes a list of statements (each with a .to_json() method),
-    extracts the JSON data, expands them where necessary, and appends them together into one DataFrame.
+    Extract and expand relations from a list of statements.
 
-    Parameters:
-    - statements: A list of statement objects (with a .to_json() method).
+    This function takes a list of statements, each with a `.to_json()` method,
+    and extracts the relevant data. It expands any nested structures and combines
+    the results into one DataFrame.
+
+    Args:
+        statements (list): A list of statement objects (with a `.to_json()` method).
 
     Returns:
-    - A Pandas DataFrame containing all the extracted and expanded statement data.
+        pd.DataFrame: A DataFrame containing all the extracted and expanded statement data.
     """
     all_dataframes = []
     for statement in statements:
@@ -62,20 +83,45 @@ def extract_relations(statements):
     if all_dataframes:
         final_df = pd.concat(all_dataframes, ignore_index=True)
     else:
-        # Print message and return an empty DataFrame with no columns if there is nothing to concatenate
-        print("No results found.")
         final_df = pd.DataFrame()
 
     return final_df
 
 
 class EdgeExtractor:
+    """
+    A class to extract edges (relationships) from INDRA statements for given nodes.
+
+    This class interacts with the INDRA API to retrieve statements involving the
+    provided nodes. It then extracts and flattens relationships into a DataFrame.
+
+    Attributes:
+        nodes (list): A list of nodes for which to extract relations.
+        statements (list, optional): A list of statements retrieved from the INDRA API.
+        edges (pd.DataFrame, optional): A DataFrame containing extracted edges.
+    """
+
     def __init__(self, nodes):
+        """
+        Initialize the EdgeExtractor with a list of nodes.
+
+        Args:
+            nodes (list): A list of nodes for edge extraction.
+        """
         self.nodes = nodes
         self.statements = None
         self.edges = None
 
     def get_statements(self):
+        """
+        Retrieve statements related to the given nodes from the INDRA API.
+
+        This function uses the `retry_on_failure` utility to handle retry logic in case
+        of failure. It stores the retrieved statements in the `self.statements` attribute.
+
+        Returns:
+            list: A list of statements related to the nodes.
+        """
         p = retry_on_failure(
             get_statements,
             max_retries=3,
@@ -99,6 +145,16 @@ class EdgeExtractor:
         return self.statements
 
     def extract_edges(self):
+        """
+        Extract edges from the statements related to the given nodes.
+
+        This function checks if statements have been retrieved; if not, it calls
+        `get_statements` to fetch them. It then processes the statements to extract
+        relationships and returns them as a DataFrame.
+
+        Returns:
+            pd.DataFrame: A DataFrame containing the extracted edges.
+        """
         if self.statements is None:
             self.get_statements()
         self.edges = extract_relations(self.statements)
@@ -106,104 +162,76 @@ class EdgeExtractor:
             print("No relationships found in the statements.")
         return self.edges
 
-    def get_type_counts(self):
-        if self.edges is None:
-            self.extract_edges()
-        return self.edges.type.value_counts() if not self.edges.empty else pd.Series()
 
-    def group_by_type(self):
-        if self.edges is None:
-            self.extract_edges()
-        if not self.edges.empty:
-            return self.edges.groupby(["type", "subj.name", "obj.name"]).size().reset_index(name="count")
+def nodes_batch(nodes):
+    """
+    Process a batch of nodes and extract relationships.
+
+    This function processes the provided list of nodes, extracts relationships using
+    the `EdgeExtractor` class, and returns a DataFrame with relationships and the nodes.
+
+    Args:
+        nodes (list): A list of nodes for edge extraction.
+
+    Returns:
+        pd.DataFrame or None: A DataFrame containing the extracted relationships or None
+        if no relationships are found for the given nodes.
+    """
+    try:
+        # Process the nodes and extract edges
+        edge_extra = EdgeExtractor(nodes)
+        statements = edge_extra.extract_edges()
+        
+        if not statements.empty:
+            # Add a new column 'nodes' to the statements DataFrame with the current nodes
+            statements = statements.assign(nodes=[tuple(nodes)] * len(statements))
+            return statements
         else:
-            print("No relationships to group by type.")
-            return pd.DataFrame()
-
-    def get_statements_raw(self):
-        if self.statements is None:
-            self.get_statements()
-        return self.statements
+            print(f"⚠️ No edges found for nodes: {nodes}")  # Print nodes with empty results
+            return None
+        
+    except Exception as e:
+        print(f"❌ An error occurred while processing nodes {nodes}: {e}")
+        return None
 
 
 def bulk_edges(nodes_lists):
+    """
+    Process a list of node sets in parallel to extract relationships.
+
+    This function processes multiple sets of nodes in parallel using the `ThreadPoolExecutor`
+    and extracts relationship information for each node set. It then combines the results
+    into one DataFrame.
+
+    Args:
+        nodes_lists (list): A list of node sets (each a list of nodes).
+
+    Returns:
+        pd.DataFrame: A DataFrame containing all the extracted relationships across the nodes.
+    """
+
     results = []
-    for nodes in tqdm(nodes_lists):
-        try:
-            print(nodes)
-            edge_extra = EdgeExtractor(nodes)
-            if edge_extra.get_statements() == []:
-                print("No relationships documented in INDRA")
-                type_count = pd.NA
-                edge_types = pd.NA
-                relationships = pd.NA
-                edges = pd.NA
-            else:
-                type_count = edge_extra.get_type_counts()
-                edge_types = edge_extra.group_by_type()
-                relationships = edge_extra.get_statements_raw()
-                edges = edge_extra.extract_edges()
-            results.append(
-                {
-                    "nodes": nodes,
-                    "type_count": type_count,
-                    "edge_types": edge_types,
-                    "relationships": relationships,
-                    "edges": edges,
-                }
-            )
-        except Exception as e:
-            print(f"An error occurred while processing nodes {nodes}: {e}")
-            continue  # Continue to the next iteration even if there's an error
+    
+    with ThreadPoolExecutor() as executor:
+        # Map the nodes_lists to the executor for parallel processing
+        for statements in tqdm(executor.map(nodes_batch, nodes_lists), total=len(nodes_lists), desc="Processing nodes"):
+            if statements is not None:
+                results.append(statements)
 
-    return pd.DataFrame(results)
-
-
-def process_results(results):
-    results_filtered = results[results["type_count"].notna()]
-    results_filtered["total_docum"] = results_filtered["type_count"].apply(
-        lambda x: x.sum() if isinstance(x, pd.Series) else 0
-    )
-    results_filtered = results_filtered.sort_values(by="total_docum", ascending=False).reset_index(drop=True)
-    return results_filtered
-
-
-def bulk_edges_parallel(nodes_lists, max_workers=5):
-    results = []
-
-    def process_node(nodes):
-        try:
-            edge_extra = EdgeExtractor(nodes)
-            if edge_extra.get_statements() == []:
-                print(f"No relationships documented in INDRA for nodes: {nodes}")
-                return {
-                    "nodes": nodes,
-                    "type_count": pd.NA,
-                    "edge_types": pd.NA,
-                    "relationships": pd.NA,
-                    "edges": pd.NA,
-                }
-            else:
-                return {
-                    "nodes": nodes,
-                    "type_count": edge_extra.get_type_counts(),
-                    "edge_types": edge_extra.group_by_type(),
-                    "relationships": edge_extra.get_statements_raw(),
-                    "edges": edge_extra.extract_edges(),
-                }
-        except Exception as e:
-            print(f"An error occurred while processing nodes {nodes}: {e}")
-            return None
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(process_node, nodes): nodes for nodes in nodes_lists}
-        for future in tqdm(as_completed(futures), total=len(futures)):
-            result = future.result()
-            if result:  # Skip failed attempts
-                results.append(result)
-
-    return pd.DataFrame(results)
-
+    if results:
+        combined_df = pd.concat(results, ignore_index=True)
+        # Select only the desired columns from the combined DataFrame
+        selected_columns = [
+            "nodes", "type", "subj.name", "obj.name", "belief", "text",
+            "text_refs.PMID", "text_refs.DOI", "text_refs.PMCID",
+            "text_refs.SOURCE", "text_refs.READER"
+        ]
+        # Ensure that the columns exist before selecting to avoid KeyErrors
+        existing_columns = [col for col in selected_columns if col in combined_df.columns]
+        return combined_df[existing_columns]
+    else:
+        return pd.DataFrame()
+    
 
 def query_indra_networ(source=None, target=None, response_format="json"):
     """
@@ -248,12 +276,4 @@ def query_bulk_pairs(pairs):
         result = query_indra_networ(source=source, target=target)
         results.append({"source": source, "target": target, "response": result})
     return results
-
-
-def excerpts(results):
-    results = pd.concat(results['edges'].values, axis=0, ignore_index=True)
-    return results
-
-def relationships(results):
-    results = pd.concat(results['edge_types'].values, axis=0, ignore_index=True)
-    return results
+    
