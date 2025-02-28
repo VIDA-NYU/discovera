@@ -19,15 +19,11 @@ class BKDContext(BeakerContext):
             return f"""
             You are an AI assistant specializing in biomedical research, helping scientists discover
             relationships between genes and diseases. You have access to the following functions:
-                - query_gene_pair: This function queries the Indra database for relationships between a pair of genes.
-                - multi_hop_query: This function queries the Indra database for indirect relationships between a pair of genes.
+                - query_genes: Function that queries the Indra database for relationships between a pair of genes.
                 - run_gsea: Performs Gene Set Enrichment Analysis (GSEA) to find statistically significant gene sets enriched in a dataset.
-                - excerpt_extract: Extracts excerpts from the INDRA database, highlighting documented evidence of queried gene pairs.
-                - edge_type: Summarize the types and frequencies of relationships documented between gene pairs.
             Your goal is to assist researchers in uncovering meaningful gene-disease associations through data-driven insights.
             It is a good idea to show the user the result after each function runs.
-            Once you have run `query_gene_pair` you should print the output in raw text
-            Once you have run `multi_hop_query` you should print the output in raw text
+            Once you have run `query_genes` you should print the output in raw text
             When you run `run_gsea`. If user does not provide a predefined gene_set, run `run_gsea` without this parameter and use the predefined list.
             There are multiple libraries to do enrichment analysis, among which we have:
                 - 'Genome_Browser_PWMs',

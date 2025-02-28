@@ -8,56 +8,27 @@ class BKDAgent(BeakerAgent):
     """
     An agent that will help discover knowledge about genes and protein lists.
     """
-
+    
     @tool()
-    async def query_gene_pair(self, gene_pair: list, agent: AgentRef) -> str:
+    async def query_genes(self, genes: str, size: int, agent: AgentRef) -> str:
         """
-        Queries the Indra database for relationships between a pair of genes.
-        Args:
-            gene_pair (list[str]): A list containing exactly two gene names to query, e.g., ["CTNNB1", "CDH1"].
-
-        Returns:
-            
-        """
-
-        code = agent.context.get_code(
-            "query_gene_pair",
-            {
-                "gene_pair": gene_pair,
-            },
-        )
-        result = await agent.context.evaluate(
-            code,
-            parent_header={},
-        )
-
-        result = result.get("return")
-
-        return result
-
-
-    @tool()
-    async def multi_hop_query(self, gene_pair: tuple, agent: AgentRef) -> str:
-        """
-        This function query the Indra database for indirect evidence documented between a pair of genes, transversing hops.
-        The gene_pair is a tuple of two gene names to query for papers documented some sort of indirect relationship, e.g. ("CTNNB1", "CDH1").
+        Queries the Indra database for relationships between the listed genes.
 
         Args:
-            gene_pair (tuple): A pair of gene names to query for indirect relationships.
+            genes (str): A string containing the genes we want to query in Indra. This list is separated by commas.
+            size (int): Size is the size of the combination. The default value is 2.
 
         Returns:
-            str: returns the matched columns
-
-        You should show the user the result after this function runs.
+            pd.DataFrame(): containing the following columns: 'nodes', 'type', 'subj.name', 'obj.name', 'belief', 'text', 'text_refs.PMID', 'text_refs.DOI', 'text_refs.PMCID', 'text_refs.SOURCE', 'text_refs.READER'         
         """
-
         code = agent.context.get_code(
-            "multi_hop_query",
+            "query_genes",
             {
-
-                "gene_pair": gene_pair,
+                "genes": genes,
+                "size": size
             },
         )
+
         result = await agent.context.evaluate(
             code,
             parent_header={},
@@ -124,64 +95,3 @@ class BKDAgent(BeakerAgent):
         
         return result 
 
-    @tool()
-    async def excerpt_extract(
-        self, 
-        gene_pair: list,
-        agent: AgentRef
-    ) -> str:
-        """
-        Extract excerpt where documented evidence/relationships were mentioned. 
-        Args:
-            gene_pair (list): The name of the dataset variable stored in the agent.
-        Returns:
-            str: Analysis results.
-        """
-        # Generate the code execution context
-        code = agent.context.get_code(
-            "excerpt_extract",
-            {
-                "gene_pair": gene_pair
-            },
-        )
-
-        # Evaluate the code asynchronously
-        result = await agent.context.evaluate(
-            code,
-            parent_header={},
-        )
-
-        result = result.get("return")
-        
-        return result
-
-    
-    async def relationships(
-        self, 
-        gene_pair: list,
-        agent: AgentRef
-    ) -> str:
-        """
-        Summarize types and number of relationships documented between a pair of genes.
-        Args:
-            gene_pair (list): The name of the dataset variable stored in the agent.
-        Returns:
-            str: Analysis results.
-        """
-        # Generate the code execution context
-        code = agent.context.get_code(
-            "relationships",
-            {
-                "dataset": gene_pair
-            },
-        )
-
-        # Evaluate the code asynchronously
-        result = await agent.context.evaluate(
-            code,
-            parent_header={},
-        )
-
-        result = result.get("return")
-        
-        return result

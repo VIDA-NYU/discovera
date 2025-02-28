@@ -1,7 +1,4 @@
-import src.bkd_context.bkd.query_indra
+from bkd_context.bkd.processing import group_edges
 
-from src.bkd_context.bkd.query_indra import relationships
-
-
-edges = relationships([{{ gene_pair }}])
-edges
+edges_types = group_edges({{dataset}})
+edges_types

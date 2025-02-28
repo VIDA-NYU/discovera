@@ -2,6 +2,7 @@ import pandas as pd
 import time
 import requests
 
+from itertools import combinations
 from pandas import json_normalize
 from indra.sources.indra_db_rest.api import get_statements
 from tqdm import tqdm
@@ -195,7 +196,40 @@ def nodes_batch(nodes):
         return None
 
 
-def bulk_edges(nodes_lists):
+def normalize_nodes(nodes):
+    """
+    Normalize the input to always return a clean list of node names.
+
+    Args:
+        nodes (str, list, or tuple): The input nodes, which can be:
+                                     - A single string with nodes (with or without quotes/parentheses).
+                                     - A list or tuple of nodes.
+                                     - A list containing a single string with comma-separated nodes.
+
+    Returns:
+        list: A properly formatted list of node names.
+    """
+    if isinstance(nodes, str):
+        # Remove surrounding parentheses or extra quotes
+        nodes = nodes.strip("()\"'")
+
+        # Split by commas and clean spaces/quotes
+        return [node.strip(" \"'") for node in nodes.split(",")]
+    
+    elif isinstance(nodes, list):
+        # If list contains a single string, treat it like a string case
+        if len(nodes) == 1 and isinstance(nodes[0], str):
+            return normalize_nodes(nodes[0])  
+        return [node.strip(" \"'") for node in nodes]  # Clean quotes from each item
+    
+    elif isinstance(nodes, tuple):
+        return [node.strip(" \"'") for node in nodes]  # Convert tuple to list & clean quotes
+
+    else:
+        raise ValueError("Invalid input format for nodes. Use a string, list, or tuple.")
+
+
+def bulk_edges(nodes, size):
     """
     Process a list of node sets in parallel to extract relationships.
 
@@ -212,6 +246,10 @@ def bulk_edges(nodes_lists):
 
     results = []
     
+    nodes = normalize_nodes(nodes)
+
+    nodes_lists = list(combinations(nodes, r=int(size)))
+
     with ThreadPoolExecutor() as executor:
         # Map the nodes_lists to the executor for parallel processing
         for statements in tqdm(executor.map(nodes_batch, nodes_lists), total=len(nodes_lists), desc="Processing nodes"):
