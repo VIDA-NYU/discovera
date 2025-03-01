@@ -4,9 +4,9 @@ import requests
 
 from itertools import combinations
 from pandas import json_normalize
-from indra.sources.indra_db_rest.api import get_statements
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
+from indra.sources.indra_db_rest.api import get_statements
 
 
 def retry_on_failure(func, max_retries=3, wait_time=5, **kwargs):
@@ -266,7 +266,10 @@ def bulk_edges(nodes, size):
         ]
         # Ensure that the columns exist before selecting to avoid KeyErrors
         existing_columns = [col for col in selected_columns if col in combined_df.columns]
-        return combined_df[existing_columns]
+        combined_df = combined_df[existing_columns]
+        combined_df['url'] = 'https://doi.org/' + combined_df['text_refs.DOI']
+
+        return combined_df
     else:
         return pd.DataFrame()
     

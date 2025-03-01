@@ -1,30 +1,34 @@
 
-
-
-import pandas as pd
-
-def group_edges(edges, group_columns=None):
+def group_edges(edges, grouping):
     """
-    Groups the edges DataFrame by the specified columns and counts occurrences.
-    
-    This function works well for pairs of relationships between two defined nodes. 
-    However, it may not perform well when the relationships are more complex, 
-    such as cases where 'subj.name' and 'obj.name' are not clearly defined.
+    Groups the edges DataFrame by predefined grouping types and counts occurrences.
 
     Args:
         edges (pd.DataFrame): The DataFrame containing edge relationships.
-        group_columns (list, optional): List of column names to group by.
-                                        If None, defaults to ["nodes", "type", "subj.name", "obj.name"].
+        grouping (str, optional): The type of grouping to apply. Options are:
+            - "summary": Groups only by 'nodes'.
+            - "detailed": Groups by 'nodes', 'type', 'subj.name', and 'obj.name'. (default)
+            - "view": Groups by 'nodes' and 'type'.
 
     Returns:
         pd.DataFrame: A grouped DataFrame with a count column, sorted by count and type.
     
     Raises:
-        ValueError: If any specified group column is not present in the DataFrame.
+        ValueError: If an invalid group_type is provided.
     """
-    # Set default group columns if not provided
-    if group_columns is None:
-        group_columns = ["nodes", "type", "subj.name", "obj.name"]
+
+    # Define grouping options
+    group_options = {
+        "summary": ["nodes"],
+        "detailed": ["nodes", "type", "subj.name", "obj.name"],
+        "view": ["nodes", "type"]
+    }
+
+    # Validate group_type
+    if grouping not in group_options:
+        raise ValueError(f"Invalid group_type '{grouping}'. Choose from {list(group_options.keys())}.")
+
+    group_columns = group_options[grouping]
 
     # Check if the provided group columns exist in the DataFrame
     if not set(group_columns).issubset(edges.columns):
@@ -33,9 +37,8 @@ def group_edges(edges, group_columns=None):
     # Perform grouping and counting
     result = edges.groupby(group_columns).size().reset_index(name="count")
     
-    # Dynamically sort by 'count' (descending) and 'type' and other columns (ascending)
+    # Sort dynamically: count descending, other columns ascending
     sort_columns = ["count"] + [col for col in group_columns if col != "count"]
     result = result.sort_values(by=sort_columns, ascending=[False] + [True] * (len(sort_columns) - 1))
     
     return result
-
