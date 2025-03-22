@@ -1,3 +1,4 @@
 .env
 *.pyc
 .beaker.conf
+.ipynb_checkpoints/
