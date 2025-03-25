@@ -7,7 +7,8 @@ def rank_gsea(
         hit_col,
         corr_col,
         min_size, 
-        max_size
+        max_size,
+        threshold
         ):
 
     dataset['rank'] = dataset[corr_col].abs()
@@ -30,5 +31,11 @@ def rank_gsea(
         outdir=None,
         verbose=True
     )
-    
-    return pd.DataFrame(results.res2d)
+    results = pd.DataFrame(results.res2d)
+    # Automatically select all columns containing 'p-val'
+    pval_columns = [col for col in results.columns if "p-val" in col or "q-val" in col]
+    # Filter rows where any 'p-val' column is greater than the threshold
+    results = results[results[pval_columns].lt(threshold).any(axis=1)]
+
+    # Display the filtered DataFrame
+    return pd.DataFrame(results)
