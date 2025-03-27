@@ -8,7 +8,7 @@ llm_service_token = ""
 
 [tools_enabled]
 ask_user = true
-run_code = false
+run_code = true
 
 [providers.openai]
 import_path = "archytas.models.openai.OpenAIModel"
