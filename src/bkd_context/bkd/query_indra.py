@@ -317,4 +317,36 @@ def query_bulk_pairs(pairs):
         result = query_indra_networ(source=source, target=target)
         results.append({"source": source, "target": target, "response": result})
     return results
+
+
+def explain_downstream(source, targets, id_type="hgnc.symbol"):
+    """
+    Sends a POST request to the Indra Discovery API to explain downstream relationships.
+
+    Parameters:
+        source (str): The source gene/protein symbol (e.g., "BRCA1").
+        targets (list): A list of target gene/protein symbols (e.g., ["TP53", "PARP1"]).
+        id_type (str): The identifier type to use for source and targets. Default is "hgnc.symbol".
+
+    Returns:
+        dict: The JSON response from the API containing the explanation of downstream interactions.
+
+    Example:
+        results = explain_downstream("BRCA1", ["TP53", "PARP1", "RAD51", "CHEK2"])
+        print(results)
+    """
+    url = "https://discovery.indra.bio/api/explain_downstream"
+    payload = {
+        "source": source,
+        "targets": targets,
+        "id_type": id_type
+    }
+    headers = {
+        "Content-Type": "application/json"
+    }
+
+    response = requests.post(url, json=payload, headers=headers)
+    response.raise_for_status()
+    return response.json()
+
     
