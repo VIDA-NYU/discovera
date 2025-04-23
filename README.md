@@ -5,7 +5,7 @@
 
 This tool is an interactive, agent-based system that integrates traditional bioinformatics tools with large language models (LLMs) and retrieval-augmented generation (RAG) to support hypothesis generation and mechanistic discovery in functional genomics.
 
-## 🔍 What It Does
+## What It Does?
 
 Bridges the gap between computational analysis and interpretability in biomedical research. It is designed to assist researchers—regardless of their coding expertise—in:
 
@@ -14,14 +14,14 @@ Bridges the gap between computational analysis and interpretability in biomedica
 - Summarizing mechanistic hypotheses using evidence from literature  
 - Formulating data-grounded biological insights  
 
-## ✨ Key Features
+## Key Features
 
 - ⚙️ **Modular System**: Combines established tools (e.g., GSEApy, INDRA) with custom modules for extensibility.  
 - 📖 **LLM Integration**: Uses LLMs for natural language reasoning and explanation generation.  
 - 🔎 **Retrieval-Augmented Generation**: Grounds summaries in real literature to improve accuracy and transparency.  
 - 💬 **Chat Interface**: Enables intuitive, dialogue-based exploration of hypotheses and gene set functions.  
 
-## 🧪 Use Case Example
+## Use Case Example
 
 In our initial deployment, this agent was used in the context of **endometrial carcinoma (EC)** to:
 
@@ -29,9 +29,11 @@ In our initial deployment, this agent was used in the context of **endometrial c
 - Perform enrichment analysis on the resulting sets  
 - Summarize literature-supported mechanisms of action  
 
-## 🛠️ System Architecture
+## System Architecture
 
-![Agent Architecture](images/discovera.pdf)
+<p align="center">
+  <img src="images/system.svg" alt="Agent Architecture" />
+</p>
 
 The system consists of:
 - Enrichment tools (e.g., GSEApy)  
@@ -39,7 +41,7 @@ The system consists of:
 - LLM-enabled prompt orchestration  
 - Chat-based user interface  
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Prerequisites
 
