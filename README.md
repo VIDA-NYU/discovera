@@ -1,66 +1,49 @@
-# bkd-example
+# 🧬 Gene Set Function Discovery with LLM-based Agents and Knowledge Retrieval
 
-First, add your OpenAI API key to the environment:
+[![Made with Python](https://img.shields.io/badge/Made%20with-Python-blue)](https://www.python.org/)
+[![LLM-Enhanced](https://img.shields.io/badge/Powered%20by-LLMs-blueviolet)]()
 
-```
-export OPENAI_API_KEY=your key goes here
-```
+This tool is an interactive, agent-based system that integrates traditional bioinformatics tools with large language models (LLMs) and retrieval-augmented generation (RAG) to support hypothesis generation and mechanistic discovery in functional genomics.
 
-Then use `docker compose` to build and run the BKDKit Beaker context:
+## 🔍 What It Does
 
-```
-docker compose build
-docker compose up -d
-```
+Bridges the gap between computational analysis and interpretability in biomedical research. It is designed to assist researchers—regardless of their coding expertise—in:
 
-Navigate to `localhost:8888` and select the `bkd_context`. You can experiment with the following script:
+- Interactively exploring gene sets associated with complex phenotypes  
+- Conducting functional enrichment analyses  
+- Summarizing mechanistic hypotheses using evidence from literature  
+- Formulating data-grounded biological insights  
 
-```
-1.- Load Gene Expression Data
-    - Load gene_expression.csv into Pandas DataFrame.
-2.- Gene Set Enrichment Analysis (GSEA)
-    - Perform GSEA using this dataset, with:
-        - GO_Biological_Process_2023 as gene_sets
-        - hit as hit_column
-        - corr as corr_column
-        - 5 as min_set
-        - 2000 as max_set
-3.- Identify Lead Genes from Top Pathway
-    - From the most statistically significant pathway identified by the GSEA, extract the lead genes.
-4.- Refine Gene List Based on Correlation
-    - Identify top {20} most correlated genes in the original dataset. Remove any genes already present in the lead gene set. Create a refined list of candidate genes for further analysis
-5.- Retrieve Documented Gene Relationships
-    - Retrieve relationships between  ["CTNNB1", "GLCE"], and save it into dataframe
-6.- Summarize Gene Pair Relationship Types and Frequencies   ["CTNNB1", "GLCE"]
-    ["CTNNB1", "NOTUM"],
-8 .- Construct Gene Network Graph
-    - Build a network graph where:
-        - Nodes = Genes
-        - Edges = Documented relationships (weighted by frequency/strength)
-7 .- Extract Gene Relationship Excerpts
-    - Extract excerpt where documented evidence/relationships was mentioned between these genes
-9.-  Contextualize Gene Relationships in Disease {(Endometrial Carcinoma)}. 
-    - Analyze how these gene relationships might relate to prospective endometrial carcinoma.
-    - Hypothesis Generation:
-        - Integrate GSEA results, known pathway involvement, and extracted literature.
-        - Use LLM-generated biological interpretations. Can you summarize these excerpts relationships in the context of {prospective endometrial carcinoma}? / Hyphotesis of how these excerpts relate to {prospective endometrial carcinoma} and the output of the GSEA anaylsis you ran before.
-10.- Suggest future research directions. Based on GSEA findings, network analysis, and literature mining, suggest:
-    - Novel hypotheses for experimental validation.
-    - Potential drug targets or pathways for intervention.
-    - Follow-up bioinformatics analyses (e.g., transcriptomic validation, single-cell analysis).
+## ✨ Key Features
 
-```
+- ⚙️ **Modular System**: Combines established tools (e.g., GSEApy, INDRA) with custom modules for extensibility.  
+- 📖 **LLM Integration**: Uses LLMs for natural language reasoning and explanation generation.  
+- 🔎 **Retrieval-Augmented Generation**: Grounds summaries in real literature to improve accuracy and transparency.  
+- 💬 **Chat Interface**: Enables intuitive, dialogue-based exploration of hypotheses and gene set functions.  
 
-## Adding tools for the agent
+## 🧪 Use Case Example
 
-Currently the agent only has one tool: `query_gene_pair`. This is defined in `src/bkd_context/agent.py`. Additional tools can easily be added by copying the template for the `query_gene_pair` tool. One thing to note is that `@tools` are managed by [Archytas](https://github.com/jataware/archytas). Archytas allows somewhat restricted argument types and does not allow direct passing of `pandas.DataFrame`. Instead, dataframes should be referenced by their variable names as a `str`. The actual code procedure that is executed (see `procedures/python3/query_gene_pair.py`) treats the arguments from the `@tool` as variable names; when they should actually _be strings_ they should be wrapped in quotes as in the `query_gene_pair.py` example. Procedures invoked by tools can have their arguments passed in using Jinja templating. For example:
+In our initial deployment, this agent was used in the context of **endometrial carcinoma (EC)** to:
 
-```
-query_gene_pair({{ dataset }}, target="{{ target }}", method="{{ method }}")
-```
+- Analyze gene sets linked to phenotypic features  
+- Perform enrichment analysis on the resulting sets  
+- Summarize literature-supported mechanisms of action  
 
-Here `{{ dataset }}` is the string name of a `pandas.DataFrame` and is interpreted as a variable, where as `"{{ target }}"` is treated as a string such as `"gdc"`.
+## 🛠️ System Architecture
 
-## Prompt modification
-There are two main places to edit the agent's prompt. In `src/bkd_context/context.py` the `auto_context` is a place to provide additional context. Currently the tools are enumerated here though this isn't strictly necessary. Additionally, prompt can be edited/managed in the `agent.py` `BKDAgent` docstring.
+![Agent Architecture](images/discovera.pdf)
 
+The system consists of:
+- Enrichment tools (e.g., GSEApy)  
+- INDRA for biological statement synthesis  
+- LLM-enabled prompt orchestration  
+- Chat-based user interface  
+
+## 🚀 Getting Started
+
+### Prerequisites
+
+- Python 3.8+  
+- [GSEApy](https://gseapy.readthedocs.io/)  
+- [INDRA](https://indra.readthedocs.io/)  
+- OpenAI or similar LLM API access  
