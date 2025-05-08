@@ -6,7 +6,10 @@
 
 Discovera is an interactive, agent-based system that integrates traditional bioinformatics tools with large language models (LLMs) and retrieval-augmented generation (RAG) to support hypothesis generation and mechanistic discovery in functional genomics.
 
-*Presented at ICLR 2025 MLGenX Workshop · [Paper Link](https://mlgenx.github.io/)*
+**Presented at** *ICLR 2025 MLGenX Workshop*
+
+🔗 [Read the Paper](https://openreview.net/pdf?id=mpvp5KP8fR) · 🖼️ [View the Poster](https://iclr.cc/media/PosterPDFs/ICLR%202025/37062.png?t=1746410988.3281965)
+
 
 ## What It Does?
 
