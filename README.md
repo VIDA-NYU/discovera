@@ -64,7 +64,7 @@ The system consists of:
 - Docker & Docker Compose
 - OpenAI API key (for LLM integration)
 
-### Installation
+### Installation and Setup
 
 Clone the repository:
 
@@ -77,22 +77,38 @@ Install Python dependencies:
 ```bash
 pip install -r requirements.txt
 ```
+### Configure Beaker
 
-Set your OpenAI API key as an environment variable:
+Copy the configuration template:
+
 ```bash
-export OPENAI_API_KEY=your-key-goes-here
+cp .beaker.conf.template .beaker.conf
 ```
+
+Open .beaker.conf in a text editor and add your OpenAI API key, if using OpenAI:
+
+```ini
+api_key = "your-api-key-here"
+```
+
+This configuration will be used when launching Docker.
 
 ### Running with Docker
 
-To use BKD-Agent with the Beaker context setup:
+To use Discovera with the Beaker context setup:
 
 ```bash
 docker compose build
 docker compose up -d
 ```
 
-Once running, navigate to [http://localhost:8888](http://localhost:8888) and select the `discovera`.
+Once running, navigate to [http://localhost:8888](http://localhost:8888) and select `discovera`.
+
+
+<p align="center">
+  <img src="images/agent_view.png" alt="Agent View" />
+</p>
+
 
 ## Example Workflow
 
