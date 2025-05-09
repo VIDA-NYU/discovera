@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "bkd_context"
+name = "discovera"
 dynamic = ["version"]
 description = ''
 readme = "README.md"
@@ -20,7 +20,7 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dependencies = [
-  "beaker_kernel~=1.10.0",
+  "beaker_kernel~=1.9.2",
   "indra",
   "altair",
   "gseapy",
@@ -47,7 +47,7 @@ require-runtime-dependencies = true
 [tool.hatch.build.hooks.beaker]
 
 [tool.hatch.version]
-path = "src/bkd_context/__about__.py"
+path = "src/discovera/__about__.py"
 
 [tool.hatch.envs.default]
 dependencies = [
@@ -74,18 +74,18 @@ dependencies = [
   "mypy>=1.0.0",
 ]
 [tool.hatch.envs.types.scripts]
-check = "mypy --install-types --non-interactive {args:src/bkd_context}"
+check = "mypy --install-types --non-interactive {args:src/discovera}"
 
 [tool.coverage.run]
 source_pkgs = ["bkd"]
 branch = true
 parallel = true
 omit = [
-  "src/bkd_context/__about__.py",
+  "src/discovera/__about__.py",
 ]
 
 [tool.coverage.paths]
-bkd = ["src/bkd_context"]
+bkd = ["src/discovera"]
 
 [tool.coverage.report]
 exclude_lines = [

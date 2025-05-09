@@ -1,4 +1,4 @@
-from src.bkd_context.bkd.gsea import rank_gsea
+from src.discovera.bkd.gsea import rank_gsea
 
 
 leading_genes = rank_gsea(

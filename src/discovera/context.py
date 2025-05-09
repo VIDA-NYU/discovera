@@ -7,7 +7,7 @@ class BKDContext(BeakerContext):
 
     enabled_subkernels = ["python3"]
 
-    SLUG = "bkd_context"
+    SLUG = "discovera"
 
     def __init__(self, beaker_kernel: "BeakerKernel", config: Dict[str, Any]):
         super().__init__(beaker_kernel, BKDAgent, config)

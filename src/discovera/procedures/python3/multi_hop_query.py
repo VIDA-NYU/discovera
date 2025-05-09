@@ -1,4 +1,4 @@
-from src.bkd_context.bkd.query_indra import query_bulk_pairs
+from src.discovera.bkd.query_indra import query_bulk_pairs
 
 # gene_pair = [("CD4", "FBP1")]
 # gene_pair

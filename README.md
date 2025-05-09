@@ -69,8 +69,8 @@ The system consists of:
 Clone the repository:
 
 ```bash
-git clone https://github.com/VIDA-NYU/bkd-agent.git
-cd bkd-agent
+git clone https://github.com/VIDA-NYU/discovera.git
+cd discovera
 ```
 
 Install Python dependencies:
@@ -92,7 +92,7 @@ docker compose build
 docker compose up -d
 ```
 
-Once running, navigate to [http://localhost:8888](http://localhost:8888) and select the `bkd_context`.
+Once running, navigate to [http://localhost:8888](http://localhost:8888) and select the `discovera`.
 
 ## Example Workflow
 
@@ -147,7 +147,7 @@ Try the following steps to see how BKD-Agent assists in biomedical discovery:
 Currently, the agent has one tool: `query_gene_pair` defined in:
 
 ```
-src/bkd_context/agent.py
+src/discovera/agent.py
 ```
 
 To add more tools:
@@ -172,7 +172,7 @@ procedures/python3/query_gene_pair.py
 There are two main areas to adjust the agent's behavior:
 
 1. **Context Management**  
-   - File: `src/bkd_context/context.py`  
+   - File: `src/discovera/context.py`  
    - Modify the `auto_context` function to alter background knowledge or enumerate tools.
 
 2. **Prompt Customization**  
