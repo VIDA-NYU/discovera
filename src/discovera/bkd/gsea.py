@@ -11,16 +11,13 @@ def rank_gsea(
         threshold
         ):
 
-    dataset['rank'] = dataset[corr_col].abs()
-    data_sorted = dataset.sort_values(by='rank', ascending=False)
-
-    data_sorted = data_sorted.drop(columns=[corr_col])
+    data_sorted = dataset.sort_values(by=corr_col, ascending=False)
 
     # Reset the index and drop the old index
     data_sorted.reset_index(drop=True, inplace=True)
 
     # Ensure the correct columns remain
-    rnk_data = data_sorted[[hit_col, 'rank']]
+    rnk_data = data_sorted[[hit_col, corr_col]]
 
     # Perform the prerank analysis
     results = gp.prerank(
