@@ -269,10 +269,113 @@ def bulk_edges(nodes, size):
         combined_df = combined_df[existing_columns]
         combined_df['url'] = 'https://doi.org/' + combined_df['text_refs.DOI']
 
-        return combined_df
+        # TODO: check if this is the best way to handle this
+        # Step 1: Pick one row with highest belief per unique 'type'
+        type_representatives = (
+            combined_df.sort_values('belief', ascending=False)
+            .drop_duplicates(subset='type', keep='first')
+        )
+
+        # Step 2: Exclude already selected rows
+        remaining_df = combined_df.drop(type_representatives.index)
+
+        # Step 3: Track used subj and obj names
+        used_subj = set(type_representatives['subj.name'])
+        used_obj = set(type_representatives['obj.name'])
+
+        # Step 4: Define mask to prioritize diverse subj/obj
+        remaining_df = remaining_df.assign(
+            is_new_subj=~remaining_df['subj.name'].isin(used_subj),
+            is_new_obj=~remaining_df['obj.name'].isin(used_obj)
+        )
+
+        # Step 5: Sort by new subj/obj and belief
+        remaining_df = remaining_df.sort_values(
+            by=['is_new_subj', 'is_new_obj', 'belief'],
+            ascending=[False, False, False]
+        )
+
+        # Step 6: Select additional rows to make total 20
+        additional_needed = 20 - len(type_representatives)
+        additional_rows = remaining_df.head(additional_needed)
+
+        # Combine and reset index
+        final_df = pd.concat([type_representatives, additional_rows]).reset_index(drop=True)
+
+        return final_df
     else:
         return pd.DataFrame()
-    
+
+# import pandas as pd
+# from itertools import combinations
+# from concurrent.futures import ThreadPoolExecutor
+# from tqdm import tqdm
+# import os
+# import hashlib
+# import pickle
+
+# def hash_node_combination(combo):
+#     """Create a unique hash for a node combination to use in filenames."""
+#     return hashlib.md5("::".join(sorted(combo)).encode()).hexdigest()
+
+# def bulk_edges(nodes, size, cache_dir="edge_cache", save_every=100):
+#     """
+#     Process a list of node sets in parallel to extract relationships, saving progress.
+
+#     Args:
+#         nodes (list): List of nodes.
+#         size (int): Size of combinations.
+#         cache_dir (str): Directory to store intermediate results.
+#         save_every (int): Save after this many processed batches.
+
+#     Returns:
+#         pd.DataFrame: Combined results from all node combinations.
+#     """
+#     os.makedirs(cache_dir, exist_ok=True)
+#     nodes = normalize_nodes(nodes)
+#     nodes_lists = list(combinations(nodes, r=int(size)))
+
+#     # Load cache index if exists
+#     processed_hashes = set(os.listdir(cache_dir))
+#     results = []
+
+#     def process_and_cache(combo):
+#         combo_hash = hash_node_combination(combo) + ".pkl"
+#         if combo_hash in processed_hashes:
+#             with open(os.path.join(cache_dir, combo_hash), "rb") as f:
+#                 return pickle.load(f)
+#         statements = nodes_batch(combo)
+#         if statements is not None and not statements.empty:
+#             with open(os.path.join(cache_dir, combo_hash), "wb") as f:
+#                 pickle.dump(statements, f)
+#             return statements
+#         return None
+
+#     with ThreadPoolExecutor() as executor:
+#         for res in tqdm(executor.map(process_and_cache, nodes_lists), total=len(nodes_lists), desc="Processing nodes"):
+#             if res is not None:
+#                 results.append(res)
+#                 if len(results) % save_every == 0:
+#                     # Save intermediate result
+#                     pd.concat(results, ignore_index=True).to_csv(
+#                         os.path.join(cache_dir, "intermediate_results.csv"), index=False
+#                     )
+
+#     if results:
+#         combined_df = pd.concat(results, ignore_index=True)
+#         selected_columns = [
+#             "nodes", "type", "subj.name", "obj.name", "belief", "text",
+#             "text_refs.PMID", "text_refs.DOI", "text_refs.PMCID",
+#             "text_refs.SOURCE", "text_refs.READER"
+#         ]
+#         existing_columns = [col for col in selected_columns if col in combined_df.columns]
+#         combined_df = combined_df[existing_columns]
+#         if 'text_refs.DOI' in combined_df.columns:
+#             combined_df['url'] = 'https://doi.org/' + combined_df['text_refs.DOI']
+#         return combined_df
+#     else:
+#         return pd.DataFrame()
+
 
 def query_indra_networ(source=None, target=None, response_format="json"):
     """

@@ -18,7 +18,7 @@ class BKDAgent(BeakerAgent):
             size (int): The size of the gene combinations. Defaults to 2.
 
         Returns:
-            pd.DataFrame(): containing the following columns: 
+            pd.DataFrame(): A dataframe containing the results of querying indra including this columns:
                 - 'nodes', 'type', 'subj.name', 'obj.name', 'belief', 'text', 'text_refs.PMID',
                   'text_refs.DOI', 'text_refs.PMCID', 'text_refs.SOURCE', 'text_refs.READER', 'url'         
         """
@@ -119,7 +119,7 @@ class BKDAgent(BeakerAgent):
                 - Default is `5` (gene sets with fewer than 5 genes are excluded).  
 
             max_size (int, optional): The maximum number of genes allowed in a gene set for it to be tested.  
-                - Default is `2000` (gene sets with more than 2000 genes are excluded to maintain specificity). 
+                - Default is `50` (gene sets with more than 50 genes are excluded to maintain specificity). 
 
             threshold (int, optional): Defaults to 0.05. 
 
@@ -166,6 +166,58 @@ class BKDAgent(BeakerAgent):
                 "min_size": min_size,
                 "max_size": max_size,
                 "threshold": threshold
+            },
+        )
+
+        # Evaluate the code asynchronously
+        result = await agent.context.evaluate(
+            code,
+            parent_header={},
+        )
+
+        result = result.get("return")
+        
+        return result 
+    
+    @tool()
+    async def ora_pipe(
+        self, 
+        dataset: str,  # This is the variable name, not the actual data
+        gene_sets: str, 
+        gene_col: str,
+        agent: AgentRef
+    ) -> str:
+        """
+        Performs Over Representation Analysis (ORA), a computational method 
+        used to determine whether a set of genes related to a biological function or pathway 
+        shows a consistent pattern of upregulation or downregulation between two conditions 
+        (e.g., healthy vs. diseased, treated vs. untreated). ORA helps identify pathways 
+        that are significantly enriched in your data.
+
+        Args:
+            dataset (str): The name of the dataset variable stored in the agent.
+            gene_sets (list, optional): A list of predefined gene set collections used for enrichment analysis.  
+                Defaults to `["MSigDB_Hallmark_2020","KEGG_2021_Human"]`
+            gene_col (str, optional): The column in the dataset that contains the gene names. Default is `"gene"`.
+
+        Returns:
+            pd.DataFrame: A DataFrame containing the ORA results, including,
+                - Term: The biological pathway or process being tested for enrichment.
+                - Overlap: The number of genes in the gene set that are also in the dataset.
+                - P-value: The statistical significance of the enrichment score.
+                - Adjusted P-value: The adjusted p-value to control for multiple testing.
+                - Odds Ratio: The ratio of the odds of the gene set being enriched in the dataset to the odds of it not being enriched.
+                - Combined Score: The combined score of the gene set.
+                - Genes: The genes in the gene set.
+        """
+
+        # Generate the code execution context
+        code = agent.context.get_code(
+            "ora_pipe",
+            {
+                "dataset": dataset, 
+                "gene_sets": gene_sets,
+                "gene_col": gene_col
             },
         )
 

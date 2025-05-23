@@ -33,6 +33,43 @@ def rank_gsea(
     pval_columns = [col for col in results.columns if "p-val" in col or "q-val" in col]
     # Filter rows where any 'p-val' column is greater than the threshold
     results = results[results[pval_columns].lt(threshold).any(axis=1)]
-
     # Display the filtered DataFrame
-    return pd.DataFrame(results)
+    return pd.DataFrame(results).head(20) # TODO: check how to handle this    
+
+
+def nrank_ora(
+        dataset,
+        gene_sets,
+        gene_col,
+        organism='human'
+    ):
+    """
+    Perform Enrichr enrichment analysis on a gene list from a DataFrame column.
+
+    Parameters:
+    - dataset (pd.DataFrame): Input data containing a column with gene symbols.
+    - gene_sets (str or list): Enrichr gene set libraries (e.g., 'KEGG_2016', 'GO_Biological_Process_2021').
+    - gene_col (str): Column name in dataset containing gene symbols.
+    - organism (str): Organism name, default is 'human'.
+    - threshold (float): Significance threshold for p-value/q-value filtering.
+
+    Returns:
+    - pd.DataFrame: Filtered enrichment results.
+    """
+    # Drop NA values in the gene column
+    genes = dataset[gene_col].dropna().astype(str).tolist()
+    print(genes)
+    # Run enrichment
+    enr = gp.enrichr(
+        gene_list=genes,
+        gene_sets=gene_sets,
+        organism=organism,
+        outdir=None,
+        verbose=True
+    )
+
+    # Convert to DataFrame
+    results = pd.DataFrame(enr.results)
+
+
+    return results.head(20) # TODO: check how to handle this
