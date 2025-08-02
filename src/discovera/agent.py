@@ -228,6 +228,64 @@ class BKDAgent(BeakerAgent):
         )
 
         result = result.get("return")
+
+
+    @tool()
+    async def enrichm_rumma(
+        self,
+        genes: str,           # Comma-separated string of gene names
+        first: int,
+        max_records: int,
+        agent: AgentRef
+    ) -> str:
+        """
+        Performs Over Representation Analysis (ORA) using the Rummagene GraphQL API.
+
+        This function uses a curated gene enrichment engine to find biological pathways,
+        gene sets, and literature associations that are significantly enriched in the 
+        input gene list. It automatically paginates through available results.
+
+        Args:
+            genes (str): A comma-separated string of gene symbols (e.g., "STAT3,CTNNB1").
+                These will be parsed and submitted as a list to the enrichment engine.
+            first (int): Defaults to 30
+            max_records (int): Defaults to 100.
+
+        Returns:
+            str: A formatted string of the top enrichment results,
+                including:
+                    - Gene Set ID
+                    - Term
+                    - Description
+                    - # Genes in Set
+                    - p-value
+                    - adj. p-value
+                    - Odds Ratio
+                    - # Overlap
+                    - PubMed Title
+                    - PMCID
+
+                If no results are found or if an error occurs, a message will be returned instead.
+        """
+
+        # Generate the code execution context
+        code = agent.context.get_code(
+            "enrichm_rumma",
+            {
+                "genes": genes,
+                "first": first,
+                "max_records": max_records,
+ 
+            },
+        )
+
+        # Evaluate the code asynchronously
+        result = await agent.context.evaluate(
+            code,
+            parent_header={},
+        )
+
+        result = result.get("return")
         
         return result 
 
