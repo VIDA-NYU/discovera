@@ -231,7 +231,7 @@ class BKDAgent(BeakerAgent):
 
 
     @tool()
-    async def enrichm_rumma(
+    async def enrich_rumma(
         self,
         genes: str,           # Comma-separated string of gene names
         first: int,
@@ -270,7 +270,7 @@ class BKDAgent(BeakerAgent):
 
         # Generate the code execution context
         code = agent.context.get_code(
-            "enrichm_rumma",
+            "enrich_rumma",
             {
                 "genes": genes,
                 "first": first,
@@ -288,4 +288,135 @@ class BKDAgent(BeakerAgent):
         result = result.get("return")
         
         return result 
+        
+    @tool()
+    async def query_string_rumma(
+        self,
+        term: str,           # Search term to query PubMed and retrieve PMC articles
+        agent: AgentRef
+    ) -> str:
+        """
+        Searches PubMed for literature using a given search term and retrieves information corresponding to 
+        gene sets found in articles matching the search term.
 
+        This function performs the following steps:
+        1. Uses the `search_pubmed` function to search PubMed with the provided term 
+        and retrieve up to 5000 matching PMC IDs.
+        2. Adds the 'PMC' prefix to each ID to conform to PMC article identifiers.
+        3. Uses the `fetch_pmc_info` function to retrieve article metadata for the 
+        identified PMC articles.
+        4. Retrieves metadata corresponding to gene sets associated to articles.
+
+        Args:
+            term (str): A query string used to search PubMed.
+
+        Returns:
+            str: A serialized representation of a dataframe including:
+                - pmcid (str): The PubMed Central ID of the article.
+                - title (str): The title of the article.
+                - yr (int): The publication year.
+                - doi (str): The Digital Object Identifier.
+                - id (str): Identifier of the gene set.
+                - term (str): String in file
+                - count (int): Number of genes in the gene set.
+
+            If no results are found or an error occurs, an informative message is returned.
+        """
+        # Generate the code execution context
+        code = agent.context.get_code(
+            "query_string_rumma",
+            {
+                "term": term,
+ 
+            },
+        )
+
+        # Evaluate the code asynchronously
+        result = await agent.context.evaluate(
+            code,
+            parent_header={},
+        )
+
+        result = result.get("return")
+        
+
+    @tool()
+    async def query_table_rumma(
+        self,
+        term: str,          
+        agent: AgentRef
+    ) -> str:
+        """
+        Searches gene set tables in the Rummagene knowledge base using a given search term,
+        and extracts metadata including associated PMC article IDs.
+
+        Args:
+            term (str): A keyword or phrase to search within gene set tables.
+
+        Returns:
+            str: A serialized representation of a dataframe including:
+                - id (str): Identifier of the gene set, not of the table.
+                - term (str): Cleaned table name or title without PMC prefix.
+                - nGeneIds (int): Number of genes in the gene set.
+                - pmcid (str): Extracted PubMed Central ID (if available).
+
+            If no results are found or an error occurs, an informative message is returned.
+        """
+        # Generate the code execution context
+        code = agent.context.get_code(
+            "query_table_rumma",
+            {
+                "term": term,
+ 
+            },
+        )
+
+        # Evaluate the code asynchronously
+        result = await agent.context.evaluate(
+            code,
+            parent_header={},
+        )
+
+        result = result.get("return")
+        return result 
+
+
+    @tool()
+    async def sets_info_rumm(
+        self,
+        gene_set_id: str,          
+        agent: AgentRef
+    ) -> str:
+        """
+        Retrieves detailed information about a specific gene set, including all genes it contains,
+        along with descriptions and functional summaries of each gene. Needs as input a string
+
+        Args:
+            gene_set_id (str): Identifier of the gene set to retrieve information for. If not provided, look into the dataset referenced, the value from the column containing gene id.
+                Expects a valid UUID, typically used as an ID or reference key in databases or APIs to referred to gene sets. 
+
+        Returns:
+            str: A serialized representation of a dataframe containing:
+                - symbol (str): Gene symbol.
+                - ncbiGeneId (str): NCBI gene identifier.
+                - description (str): Brief description of the gene.
+                - summary (str): Summary of the gene's function.
+
+        """
+        # Generate the code execution context
+        code = agent.context.get_code(
+            "sets_info_rumm",
+            {
+                "gene_set_id": gene_set_id,
+ 
+            },
+        )
+
+        # Evaluate the code asynchronously
+        result = await agent.context.evaluate(
+            code,
+            parent_header={},
+        )
+
+        result = result.get("return")
+        return result

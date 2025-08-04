@@ -23,7 +23,11 @@ class BKDContext(BeakerContext):
                 - count_edges: Counts and groups interactions found in the dataset based on the specified grouping type.
                 - gsea_pipe: Performs Gene Set Enrichment Analysis (GSEA) to find statistically significant gene sets enriched in a dataset.
                 - ora_pipe: Performs Over Representation Analysis (ORA) to find statistically significant gene sets enriched in a dataset.
-                - enrichm_rumma: Performs Over Representation Analysis (ORA) using the Rummagene GraphQL API.
+                - enrich_rumma: Performs Over Representation Analysis (ORA) using the Rummagene GraphQL API. Uses as input a set of genes.
+                - search_rumma: Searches PubMed using a specified term and returns gene sets identified within the matching articles.
+                - query_table_rumma: Searches gene set tables in the Rummagene knowledge base using a given search term.
+                - sets_info_rumm: Retrieves detailed information about a gene set, including its genes with descriptions and functional summaries.
+
             Your goal is to assist researchers in uncovering meaningful gene-disease associations through data-driven insights.
 
             For `gsea_pipe` and `ora_pipe` consider mentioning the dafault parameters used as well of an explanation of the paramaters used. For `gsea_pipe` show the output in this format:

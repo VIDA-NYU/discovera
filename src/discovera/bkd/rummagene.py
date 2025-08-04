@@ -305,7 +305,7 @@ def search_pubmed(term: str, retmax: int = 5000) -> List[str]:
     return r.json().get("esearchresult", {}).get("idlist", [])
 
 
-def pmci_query(pmcids: List[str], url: str = GRAPHQL_URL, headers: Optional[Dict] = None) -> pd.DataFrame:
+def fetch_pmc_info(pmcids: List[str], url: str = GRAPHQL_URL, headers: Optional[Dict] = None) -> pd.DataFrame:
     """
     Get metadata for PMC articles by their PMCIDs.
 
@@ -369,5 +369,6 @@ def gene_sets_paper_query(pmcids: List[str], url: str = GRAPHQL_URL, headers: Op
         url=url,
         headers=headers
     )
-
-    return pd.DataFrame(data["termsPmcsCount"]["nodes"])
+    data = pd.DataFrame(data["termsPmcsCount"]["nodes"])
+    data = data.rename(columns={"pmc": "pmcid"})
+    return data
