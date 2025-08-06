@@ -1,6 +1,5 @@
 from archytas.tool_utils import AgentRef, LoopControllerRef, is_tool, tool, toolset
 from beaker_kernel.lib.agent import BeakerAgent
-from beaker_kernel.lib.context import BeakerContext
 
 
 class BKDAgent(BeakerAgent):
@@ -108,12 +107,12 @@ class BKDAgent(BeakerAgent):
                 - GO_Cellular_Component_2015: GO category focusing on cellular locations  
                 (e.g., nucleus, membrane, mitochondria). 
 
-            hit_col (str, optional): The column in the ranked gene list that indicates whether a gene  
-                is part of a gene set. Default is `"hit"`.  
+            hit_col (str, optional): The column name in the dataset that contains gene symbols 
+                (e.g., "VWA2", "TSC22D4", etc.). These will be used as identifiers 
+                to match against gene sets during enrichment.
 
-            corr_col (str, optional): The column in the ranked gene list containing correlation values,  
-                which are used to rank genes based on their association with a condition. Default is `"corr"`.  
-
+            corr_col (str, optional): The column in the ranked gene list containing correlation or scoring values,
+                which are used to rank genes by association with a condition.
             min_size (int, optional): The minimum number of genes required for a gene set to be included
                 in the analysis.  
                 - Default is `5` (gene sets with fewer than 5 genes are excluded).  
@@ -149,10 +148,12 @@ class BKDAgent(BeakerAgent):
                     - Higher % = More overlap with the pathway.
                 * Lead_genes: The key genes contributing to the enrichment signal in the pathway.
         Notes:
-            - Smaller `min_size` values allow more gene sets but may include unreliable results.  
-            - Larger `max_size` values include broader pathways but may be too general.  
-            - Look for pathways with high NES and low FDR q-values (< 0.25, ideally < 0.05) 
-              for biologically significant results. 
+            - The `hit_col` must contain actual gene symbols (not booleans).
+            - A high NES and low FDR indicate strong and reliable enrichment.
+            - Smaller `min_size` includes more pathways but can reduce reliability.
+            - Larger `max_size` can dilute pathway specificity.
+            - If `hit_col` contains numeric or non-symbol gene identifiers (e.g., Entrez or Ensembl),
+            they will be automatically mapped to gene symbols before running GSEA.
         """
 
         # Generate the code execution context
@@ -198,7 +199,7 @@ class BKDAgent(BeakerAgent):
             dataset (str): The name of the dataset variable stored in the agent.
             gene_sets (list, optional): A list of predefined gene set collections used for enrichment analysis.  
                 Defaults to `["MSigDB_Hallmark_2020","KEGG_2021_Human"]`
-            gene_col (str, optional): The column in the dataset that contains the gene names. Default is `"gene"`.
+            gene_col (str, optional): The column in the dataset that contains the gene symbols. Default is `"gene"`.
 
         Returns:
             pd.DataFrame: A DataFrame containing the ORA results, including,
@@ -412,6 +413,43 @@ class BKDAgent(BeakerAgent):
             },
         )
 
+        # Evaluate the code asynchronously
+        result = await agent.context.evaluate(
+            code,
+            parent_header={},
+        )
+
+        result = result.get("return")
+        return result
+    
+    @tool()
+    async def literature_trends(
+        self,
+        term: str,
+        email: str,
+        agent: AgentRef
+    ) -> str:
+        """
+        Plots a timeline of PubMed articles related to a term, showing research trends.
+
+        Args:
+            term (str): Keyword or phrase (e.g., "autophagy", "TP53", "CTNNB1 and DKK are upregulated in tumors").
+            email (str): Email, required to query pubmed. If not provided, ask user kindly to provide it.
+
+
+        Returns:
+            str: Base64 image or markdown with year-wise publication chart.
+        """
+
+        # Generate the code execution context
+        code = agent.context.get_code(
+            "literature_trends",
+            {
+                "term": term,
+                "email": email
+ 
+            },
+        )
         # Evaluate the code asynchronously
         result = await agent.context.evaluate(
             code,
