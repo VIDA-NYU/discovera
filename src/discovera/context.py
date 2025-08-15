@@ -74,16 +74,16 @@ class BKDContext(BeakerContext):
         - If the input is a **gene list**, use:  
             - **enrich_rumma**: Run Over Representation Analysis using Rummagene’s curated gene sets.
         
-        - If the input is **text or a search term** (e.g., disease name, phenotype, biological process), use:
-            - **query_string_rumma**: Search PubMed and extract gene sets from relevant articles.
-            - **query_table_rumma**: Search Rummagene’s curated gene set tables using keywords.
+        - If the input is **text or a search term** (e.g., disease name, phenotype, biological process), use this two tools in the following order:
+            - **query_string_rumma**: Search Rummagene for articles with matching gene sets.
+            - **query_table_rumma**: Search Rummagene's curated gene set tables using keywords.
 
         - For functional summaries and metadata of any gene set, use:
             - **sets_info_rumm**: Retrieve detailed descriptions and biological context.
 
         Searching existing literature:
         - **literature_trends**: Plots a timeline of PubMed articles related to a term, showing research trends.
-
+        - **prioritize_genes**: Prioritize genes based on a scoring function.
         ---
 
         ### Output guidelines:
