@@ -4,6 +4,8 @@ from collections import Counter
 from Bio import Entrez
 import pandas as pd
 from collections import defaultdict
+import requests
+import random
 
 
 def search_pubmed(term: str, email: str):

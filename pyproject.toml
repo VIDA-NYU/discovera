@@ -31,7 +31,8 @@ dependencies = [
   "jupyter_contrib_nbextensions",
   "vega3",
   "notebook",  # Added for rendering HTML
-  "biopython",
+  "biopython", 
+  "mygene" # gene information
 ]
 
 [project.urls]

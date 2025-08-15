@@ -68,6 +68,7 @@ class BKDContext(BeakerContext):
         - **count_edges**: Aggregate and count interactions by specified groupings.
         - **gsea_pipe**: Perform Gene Set Enrichment Analysis with detailed, formatted output and visualization.
         - **ora_pipe**: Perform Over Representation Analysis with detailed, formatted output and graphs.
+        - **gene_info**: Get gene information, meaning symbol, name, summary and aliases.
         
         When interacting with the Rummagene API, you can access any or all of the following functions, depending on the input:
 

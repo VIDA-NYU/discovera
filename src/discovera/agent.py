@@ -458,3 +458,64 @@ class BKDAgent(BeakerAgent):
 
         result = result.get("return")
         return result
+    
+    @tool()
+    async def prioritize_genes(
+        self,
+        gene_list: str,
+        context_term: str,
+        agent: AgentRef
+    ) -> str:
+        """
+        Prioritize genes in context of disease or phenotype.
+        Args:
+            gene_list (str): String of gene lists.
+            context_term (str): Context term which can be disease
+        Returns:
+            str: Base64 image or markdown with year-wise publication chart.
+        """
+        # Generate the code execution context
+        code = agent.context.get_code(
+            "prioritize_genes",
+            {
+                "gene_list": gene_list,
+                "context_term": context_term
+
+            },
+        )
+        # Evaluate the code asynchronously
+        result = await agent.context.evaluate(
+            code,
+            parent_header={},
+        )
+        result = result.get("return")
+        return result
+    
+    @tool()
+    async def gene_info(
+        self,
+        gene_list: str,
+        agent: AgentRef
+    ) -> str:
+        """
+        Prioritize genes in context of disease or phenotype.
+        Args:
+            gene_list (str): String of gene lists.
+        Returns:
+            str: Dataframe with gene information
+        """
+        # Generate the code execution context
+        code = agent.context.get_code(
+            "gene_info",
+            {
+                "gene_list": gene_list,
+
+            },
+        )
+        # Evaluate the code asynchronously
+        result = await agent.context.evaluate(
+            code,
+            parent_header={},
+        )
+        result = result.get("return")
+        return result
