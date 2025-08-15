@@ -31,6 +31,7 @@ dependencies = [
   "jupyter_contrib_nbextensions",
   "vega3",
   "notebook",  # Added for rendering HTML
+  "biopython",
 ]
 
 [project.urls]
@@ -49,12 +50,12 @@ require-runtime-dependencies = true
 [tool.hatch.version]
 path = "src/discovera/__about__.py"
 
-[tool.hatch.envs.default]
+[tool.hatch.envs.discovera]
 dependencies = [
   "coverage[toml]>=6.5",
   "pytest",
 ]
-[tool.hatch.envs.default.scripts]
+[tool.hatch.envs.discovera.scripts]
 test = "pytest {args:tests}"
 test-cov = "coverage run -m pytest {args:tests}"
 cov-report = [
