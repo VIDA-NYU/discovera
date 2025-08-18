@@ -90,12 +90,12 @@ class BKDAgent(BeakerAgent):
         used to determine whether a set of genes related to a biological function or pathway 
         shows a consistent pattern of upregulation or downregulation between two conditions 
         (e.g., healthy vs. diseased, treated vs. untreated). GSEA helps identify pathways 
-        that are significantly enriched in your data.
+        that are significantly enriched in the data.
 
         Args:
             dataset (str): The name of the dataset variable stored in the agent.
-            gene_sets (list, optional): A list of predefined gene set collections used for enrichment analysis.  
-                Defaults to `["KEGG_2016", "GO_Biological_Process_2023", "Reactome_Pathways_2024", "MSigDB_Hallmark_2020", "GO_Molecular_Function_2015", "GO_Cellular_Component_2015"]`:
+            gene_sets (str, optional): A list of predefined gene set collections used for enrichment analysis.  
+                Defaults to `"KEGG_2016", "GO_Biological_Process_2023", "Reactome_Pathways_2024", "MSigDB_Hallmark_2020"`:
                 - KEGG_2016: Kyoto Encyclopedia of Genes and Genomes (metabolic and signaling pathways).  
                 - GO_Biological_Process_2023: Gene Ontology (GO) focusing on biological processes  
                 (e.g., cell division, immune response).  
@@ -113,6 +113,7 @@ class BKDAgent(BeakerAgent):
 
             corr_col (str, optional): The column in the ranked gene list containing correlation or scoring values,
                 which are used to rank genes by association with a condition.
+
             min_size (int, optional): The minimum number of genes required for a gene set to be included
                 in the analysis.  
                 - Default is `5` (gene sets with fewer than 5 genes are excluded).  
@@ -197,8 +198,8 @@ class BKDAgent(BeakerAgent):
 
         Args:
             dataset (str): The name of the dataset variable stored in the agent.
-            gene_sets (list, optional): A list of predefined gene set collections used for enrichment analysis.  
-                Defaults to `["MSigDB_Hallmark_2020","KEGG_2021_Human"]`
+            gene_sets (str, optional): A list of predefined gene set collections used for enrichment analysis.  
+                Defaults to `"MSigDB_Hallmark_2020","KEGG_2021_Human"`
             gene_col (str, optional): The column in the dataset that contains the gene symbols. Default is `"gene"`.
 
         Returns:

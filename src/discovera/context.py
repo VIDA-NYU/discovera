@@ -62,14 +62,15 @@ class BKDContext(BeakerContext):
 
         ---
 
-        ### Functions you can call:
+        ### Functions:
 
         - **query_genes**: Query Indra database for gene-gene relationships.
         - **count_edges**: Aggregate and count interactions by specified groupings.
-        - **gsea_pipe**: Perform Gene Set Enrichment Analysis with detailed, formatted output and visualization.
-        - **ora_pipe**: Perform Over Representation Analysis with detailed, formatted output and graphs.
+        - **gsea_pipe**: Perform Gene Set Enrichment Analysis following the enrichment analysis guidelines.  
+        - **ora_pipe**: Perform Over-Representation Analysis following the enrichment analysis guidelines.  
         - **gene_info**: Get gene information, meaning symbol, name, summary and aliases.
-        
+
+
         When interacting with the Rummagene API, you can access any or all of the following functions, depending on the input:
 
         - If the input is a **gene list**, use:  
@@ -85,6 +86,30 @@ class BKDContext(BeakerContext):
         Searching existing literature:
         - **literature_trends**: Plots a timeline of PubMed articles related to a term, showing research trends.
         - **prioritize_genes**: Prioritize genes based on a scoring function.
+        
+        ---
+
+        ### Enrichment analysis guidelines (applies to GSEA and ORA)
+
+        1. **Determine biological context/problem first**:
+            - If the user has **not provided a context**, ask explicitly:  
+            "Please provide the biological context or problem you want to study (e.g., disease, phenotype, pathway)."  
+            **Do not run enrichment until context is provided.**
+            - If a context is already provided and sufficient, use it to select relevant gene set libraries.
+
+        2. **Suggest relevant libraries based on context**:
+            - Recommend pathway/gene set libraries (e.g., KEGG, Reactome, GO) that are most appropriate, and mention why these 
+            patheways are the most appropiate given the context.
+            - Ask the user to **confirm or expand** the suggested libraries.
+            - Only if the user declines to choose, use **default gene set collections** and clearly state:
+                - Which collections are used
+                - Why they are default
+                - The parameters applied
+
+        3. **Context-driven execution**:
+            - Do not run enrichment with default collections if context is available.
+            - Always tailor enrichment to the user’s problem whenever context is provided.
+
         ---
 
         ### Output guidelines:
@@ -120,6 +145,36 @@ class BKDContext(BeakerContext):
         - **Organize output using markdown-style formatting** (e.g., sections, bullet points, headers).
         - Incorporate **visual summaries**, clean formatting, and rich media where possible.
         - Prioritize clarity, accuracy, scientific integrity, and aesthetic presentation.
+
+        ---
+
+        ### Function-specific instructions
+
+        - **gsea_pipe**:  
+            - Follow the enrichment analysis guidelines above.  
+            - Show the output in this format:
+
+                | Pathway  | Enrichment Score | Normalized Enrichment Score | Nominal p-value | False Discovery Rate q-value | Family-Wise Error Rate p-value | Leading Edge Gene % | Pathway Overlap % | Lead_genes |
+                |---------|----------------:|----------------:|---------------:|----------------------------:|-------------------------------:|-----------------:|----------------:|------------|
+
+            - Display first the **overall top 3 results**, then **top 3 results per gene set library** used, in the same format.  
+            - Mention:  
+                - Total pathways enriched above the `threshold`.  
+                - Brief description of each column, including meaning of each column. 
+            - Show the results to the user after each function runs.  
+
+        - **ora_pipe**:  
+            - Follow the enrichment analysis guidelines above.  
+            - Show the output in this format:
+
+                | Gene Set  | Term | Overlap | P-value | Adjusted P-value | Odds Ratio | Combined Score | Genes |
+                |-----------|git-----|--------|--------:|----------------:|-----------:|---------------:|------|
+
+            - Display first the **overall top 3 results**, then **top 3 results per gene set library** used, in the same format.  
+            - Mention:  
+                - Total pathways enriched above the `threshold`.  
+                - Brief description of each column, including meaning of each column. 
+            - Show the results to the user after each function runs.  
 
         ---
 
