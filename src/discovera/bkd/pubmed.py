@@ -6,6 +6,9 @@ import pandas as pd
 from collections import defaultdict
 import requests
 import random
+import os
+
+from IPython.display import display, Image
 
 
 def search_pubmed(term: str, email: str):
@@ -79,7 +82,7 @@ def plot_publication_timeline(years: list[int], term: str, figsize: tuple = (12,
     ax.grid(True, axis='y', linestyle='--', alpha=0.7)
     plt.tight_layout()
     plt.show()
-
+    display(fig)
     return fig
 
 
@@ -88,8 +91,7 @@ def literature_timeline(term: str, email: str, batch_size: int = 500, figsize: t
     Main function to search, fetch, and plot publication timeline.
 
     Returns:
-        fig: Matplotlib figure.
-        year_to_ids: Dict of {year: [pmid1, pmid2, ...]}
+        - save_path (str): Full path to the saved PNG file of the figure.
     """
     webenv, query_key, total_count = search_pubmed(term, email)
     if total_count == 0 or not webenv or not query_key:
@@ -102,7 +104,13 @@ def literature_timeline(term: str, email: str, batch_size: int = 500, figsize: t
         for year, pmids in year_to_ids.items()
     }
     fig = plot_publication_timeline(pub_years, term, figsize)
-    return fig, year_to_ids
+    # Save figure in Beaker environment
+    filename = f"{term.replace(' ', '_')}_timeline.png"
+    save_path = os.path.join(".", filename)  # Beaker userfiles folder
+    fig.savefig(save_path, dpi=300, bbox_inches='tight')
+
+    print(f"Figure saved to Beaker environment: {save_path}")
+    return year_to_ids, save_path
 
 
 def search_pubmed_count(query: str, email: str = "test@example.com") -> int:

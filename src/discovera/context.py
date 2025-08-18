@@ -5,32 +5,12 @@ from .agent import BKDAgent
 
 class BKDContext(BeakerContext):
 
-    enabled_subkernels = ["python3"]
-
-    SLUG: str = "discovera"
 
     def __init__(self, beaker_kernel: "BeakerKernel", config: Dict[str, Any]):
         super().__init__(beaker_kernel, BKDAgent, config)
 
     async def setup(self, context_info=None, parent_header=None):
         super().setup(context_info, parent_header)
-        await self.set_context(language="python3", context=self.SLUG, context_info=context_info or {})
-
-    async def set_context(self, language: str, context: str, context_info: Dict = None):
-        """
-        Sends a context setup request message to change the kernel's context.
-        """
-        if context_info is None:
-            context_info = {}
-
-        msg_payload = {
-            "language": language,
-            "context": context,
-            "context_info": context_info
-        }
-
-        # send_custom_message should be async if it involves I/O
-        await self.send_custom_message("context_setup_request", msg_payload)
 
     async def auto_context(self):
         return f"""
@@ -84,7 +64,22 @@ class BKDContext(BeakerContext):
             - **sets_info_rumm**: Retrieve detailed descriptions and biological context.
 
         Searching existing literature:
-        - **literature_trends**: Plots a timeline of PubMed articles related to a term, showing research trends.
+        
+        - **literature_trends**:  
+            - Plots a timeline of PubMed articles related to a term, showing research trends.  
+            - Always:  
+                1. Save the figure as a PNG file.  
+                2. Immediately re-read that PNG from disk and show it inline in the Beaker environment, using:  
+                ```python
+                from IPython.display import Image, display
+                display(Image(filename=save_path))
+                ```  
+            - The output to the user should contain:  
+                - A clean textual summary of results (key years, article counts, etc.).  
+                - The inline visualization (PNG loaded and displayed).  
+                - The file path where the PNG was saved (for reproducibility).  
+            - If inline rendering fails, embed the PNG directly in Markdown with `![](path/to/file.png)`.
+
         - **prioritize_genes**: Prioritize genes based on a scoring function.
         
         ---

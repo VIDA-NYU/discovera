@@ -1,4 +1,4 @@
 from src.discovera.bkd.pubmed import literature_timeline
 
-timeline = literature_timeline(term="{{ term }}", email="{{ email }}")
-timeline
+year_to_ids, save_path = literature_timeline(term="{{ term }}", email="{{ email }}")
+year_to_ids, save_path

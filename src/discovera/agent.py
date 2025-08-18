@@ -439,7 +439,7 @@ class BKDAgent(BeakerAgent):
 
 
         Returns:
-            str: Base64 image or markdown with year-wise publication chart.
+            str: Years and Ids.
         """
 
         # Generate the code execution context
