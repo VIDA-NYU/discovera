@@ -1,6 +1,8 @@
 import gseapy as gp
 import pandas as pd
 
+from datetime import datetime
+
 def rank_gsea(
         dataset, 
         gene_sets,
@@ -33,8 +35,22 @@ def rank_gsea(
     pval_columns = [col for col in results.columns if "p-val" in col or "q-val" in col]
     # Filter rows where any 'p-val' column is greater than the threshold
     results = results[results[pval_columns].lt(threshold).any(axis=1)]
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"filtered_results_{timestamp}.csv"
+    # Save to CSV
+    results.to_csv(filename, index=False)
+    print(f"Number of matching results with p-val smaller than {threshold}: {len(results)}")
     # Display the filtered DataFrame
-    return pd.DataFrame(results).head(20) # TODO: check how to handle this    
+    top_high_nes = results.sort_values(by="NES", ascending=False).head(10)
+
+    # Select top N lowest NES
+    top_low_nes = results.sort_values(by="NES", ascending=True).head(10)
+
+    # Combine the two sets
+    top_combined = pd.concat([top_high_nes, top_low_nes]).drop_duplicates()
+    return top_combined
+
+ # TODO: check how to handle this    
 
 
 def nrank_ora(
@@ -71,6 +87,7 @@ def nrank_ora(
     # Convert to DataFrame
     results = pd.DataFrame(enr.results)
 
+    print(f"Number of matching results: {len(results)}")
 
     return results.head(20) # TODO: check how to handle this
 

@@ -231,6 +231,8 @@ class BKDAgent(BeakerAgent):
 
         result = result.get("return")
 
+        return result
+
 
     @tool()
     async def enrich_rumma(
@@ -520,3 +522,5 @@ class BKDAgent(BeakerAgent):
         )
         result = result.get("return")
         return result
+
+
