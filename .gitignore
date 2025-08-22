@@ -3,3 +3,12 @@
 .beaker.conf
 .ipynb_checkpoints/
 .DS_Store
+
+
+# build files
+build/
+dist/
+*.egg-info/
+
+# virtual environment
+.venv/
