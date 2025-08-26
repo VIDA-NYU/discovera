@@ -3,8 +3,9 @@ from beaker_kernel.lib.context import BeakerContext
 
 from .agent import BKDAgent
 
-class BKDContext(BeakerContext):
 
+class BKDContext(BeakerContext):
+    slug = "discovera"
 
     def __init__(self, beaker_kernel: "BeakerKernel", config: Dict[str, Any]):
         super().__init__(beaker_kernel, BKDAgent, config)
@@ -212,5 +213,3 @@ class BKDContext(BeakerContext):
         """.strip()
 
         return base_context
-
- 
