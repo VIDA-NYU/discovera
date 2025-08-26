@@ -73,10 +73,6 @@ git clone https://github.com/VIDA-NYU/discovera.git
 cd discovera
 ```
 
-Install Python dependencies:
-```bash
-pip install -r requirements.txt
-```
 ### Configure Beaker
 
 Copy the configuration template:
