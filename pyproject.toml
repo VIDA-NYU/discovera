@@ -20,7 +20,7 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dependencies = [
-  "beaker_kernel~=1.9.2",
+  "beaker_kernel~=1.11.1",
   "indra",
   "altair",
   "gseapy",
