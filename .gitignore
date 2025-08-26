@@ -3,7 +3,7 @@
 .beaker.conf
 .ipynb_checkpoints/
 .DS_Store
-
+.kube/
 
 # build files
 build/
