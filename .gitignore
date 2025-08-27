@@ -13,3 +13,4 @@ output/
 
 # virtual environment
 .venv/
+.kube/config
