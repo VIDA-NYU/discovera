@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 
 
@@ -19,27 +19,17 @@ The correlation or scoring value of the gene.
 
 
 class GseaPipeInput(BaseModel):
-    dataset: List[GseaRow] = Field(
+    csv_id: Optional[str] = Field(
+        default=None,
         description="""
-The dataset to analyze in pandas DataFrame dict format, e.g.
-[
-    {
-        "hit": "VWA2",
-        "corr": 0.657806,
-        "containment": 1.0,
-        "score": 77.0,
-        "rerank_score": 1.0
-    },
-    {
-        "hit": "TSC22D4",
-        "corr": -0.40405,
-        "containment": 1.0,
-        "score": 67.0,
-        "rerank_score": 2.0
-    },
-    ...
-]
-"""
+ID of a stored CSV entry (preferred). If provided, the server will load data from this CSV.
+""",
+    )
+    csv_path: Optional[str] = Field(
+        default=None,
+        description="""
+Absolute path to a CSV to read if id is not provided.
+""",
     )
     gene_sets: Optional[List[str]] = Field(
         default=[
@@ -88,7 +78,7 @@ in the analysis.
 """,
     )
     max_size: Optional[int] = Field(
-        default=50,
+        default=200,
         description="""
 The maximum number of genes allowed in a gene set.
 """,
@@ -110,11 +100,23 @@ The size of the gene combinations. Defaults to 2.
 
 
 class OraPipeInput(BaseModel):
-    genes: List[str] = Field(
+    csv_id: Optional[str] = Field(
+        default=None,
         description="""
-A list of genes to be tested for enrichment.
-e.g. ["VWA2", "TSC22D4", ...]
-"""
+ID of a stored CSV entry. If provided, genes will be read from this CSV.
+""",
+    )
+    csv_path: Optional[str] = Field(
+        default=None,
+        description="""
+Absolute path to a CSV to read if id is not provided.
+""",
+    )
+    gene_col: Optional[str] = Field(
+        default="gene",
+        description="""
+Column name in the CSV containing gene symbols (used when csv_id/csv_path is provided).
+""",
     )
     gene_sets: Optional[List[str]] = Field(
         default=["MSigDB_Hallmark_2020", "KEGG_2021_Human"],
@@ -222,4 +224,143 @@ class GeneInfoInput(BaseModel):
         description="""
 A list of gene symbols for annotation lookup.
 """
+    )
+
+
+# =========================
+# Storage and CSV tool models
+# =========================
+
+# class StorageSaveInput(BaseModel):
+#     filename: Optional[str] = Field(default=None, description="""
+# Desired filename including extension. If omitted, a timestamped name is generated.
+# """)
+#     subdir: Optional[str] = Field(default="storage", description="""
+# Subdirectory under output/ where the file will be saved (e.g., storage, user_csvs).
+# """)
+#     category: Optional[str] = Field(default="generated", description="""
+# Logical category for the file (e.g., generated, user_input, report).
+# """)
+#     origin_tool: Optional[str] = Field(default=None, description="""
+# Name of the tool that produced this file (if any).
+# """)
+#     tags: Optional[List[str]] = Field(default=None, description="""
+# List of tags to attach for filtering (e.g., gsea, plot, raw).
+# """)
+#     metadata: Optional[Dict[str, Any]] = Field(default=None, description="""
+# Arbitrary metadata to store alongside the entry (parameters, context, etc.).
+# """)
+#     content_text: Optional[str] = Field(default=None, description="""
+# Text content to save. Mutually exclusive with content_base64.
+# """)
+#     content_base64: Optional[str] = Field(default=None, description="""
+# Base64-encoded binary content to save. Mutually exclusive with content_text.
+# """)
+
+
+class StorageListInput(BaseModel):
+    origin_tool: Optional[str] = None
+    tag: Optional[str] = None
+    ext: Optional[str] = None
+    category: Optional[str] = None
+    name_contains: Optional[str] = None
+    since: Optional[str] = Field(
+        default=None,
+        description="""
+ISO timestamp; include files created at or after this time.
+""",
+    )
+    until: Optional[str] = Field(
+        default=None,
+        description="""
+ISO timestamp; include files created at or before this time.
+""",
+    )
+    with_content: Optional[bool] = Field(
+        default=False,
+        description="""
+If true, include content (text or base64) up to max_bytes in the response.
+""",
+    )
+    max_bytes: Optional[int] = Field(
+        default=1048576,
+        description="""
+Maximum number of bytes to read when including content.
+""",
+    )
+
+
+class StorageGetInput(BaseModel):
+    id: Optional[str] = Field(
+        default=None,
+        description="""
+ID of the stored entry (preferred). If not provided, path must be provided.
+""",
+    )
+    path: Optional[str] = Field(
+        default=None,
+        description="""
+Absolute path to the file. Used if id is not provided.
+""",
+    )
+    with_content: Optional[bool] = Field(
+        default=True,
+        description="""
+If true, include content (text or base64) up to max_bytes in the response.
+""",
+    )
+    max_bytes: Optional[int] = Field(default=1048576)
+
+
+class CsvRecordInput(BaseModel):
+    name: Optional[str] = Field(
+        default=None,
+        description="""
+Logical name for the CSV (used to derive filename). If omitted, timestamped name is used.
+""",
+    )
+    csv_text: Optional[str] = Field(
+        default=None,
+        description="""
+CSV content as text. Mutually exclusive with csv_base64.
+""",
+    )
+    csv_base64: Optional[str] = Field(
+        default=None,
+        description="""
+CSV content as base64. Mutually exclusive with csv_text.
+""",
+    )
+    tags: Optional[List[str]] = Field(
+        default=None,
+        description="""
+Tags to associate (e.g., user_input, dataset).
+""",
+    )
+    metadata: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="""
+Arbitrary metadata to store (e.g., source, description).
+""",
+    )
+
+
+class CsvReadInput(BaseModel):
+    id: Optional[str] = Field(
+        default=None,
+        description="""
+ID of a stored CSV entry. If not provided, path must be provided.
+""",
+    )
+    path: Optional[str] = Field(
+        default=None,
+        description="""
+Absolute path to a CSV file to read.
+""",
+    )
+    n_rows: Optional[int] = Field(
+        default=20,
+        description="""
+Number of rows to return from the top of the CSV (preview).
+""",
     )
