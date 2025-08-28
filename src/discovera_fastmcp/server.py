@@ -7,6 +7,10 @@ capabilities designed to work with ChatGPT's chat and deep research features.
 
 import logging
 import os
+import json
+import base64
+import hashlib
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from itertools import combinations
@@ -14,10 +18,12 @@ from typing import Any, Dict, List
 
 import gseapy as gp
 import pandas as pd
+import traceback
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from openai import OpenAI
 from tqdm import tqdm
+from pydantic import ValidationError
 
 from src.discovera_fastmcp.pydantic import (
     GseaPipeInput,
@@ -30,7 +36,12 @@ from src.discovera_fastmcp.pydantic import (
     LiteratureTrendsInput,
     PrioritizeGenesInput,
     GeneInfoInput,
+    StorageListInput,
+    StorageGetInput,
+    CsvRecordInput,
+    CsvReadInput,
 )
+from src.discovera.bkd.gsea import plot_gsea_results
 from src.discovera.bkd.query_indra import nodes_batch, normalize_nodes
 from src.discovera.bkd.rummagene import (
     enrich_query,
@@ -64,13 +75,6 @@ You are an assistant MCP specializing in biomedical research, focusing on gene-d
 molecular mechanisms, and mutation-specific effects. Always consider tissue specificity and biological
 context when interpreting data.
 
-Your core strengths include:
-- Deep understanding of biomedical data and gene interactions.
-- Ability to query multiple databases and pipelines effectively.
-- Visualization of complex results using appropriate graphs and plots.
-- Source verification and citation of relevant databases and articles.
-- Self-awareness to reflect on your responses critically.
-- Clear, concise, and visually engaging communication tailored to researchers.
 
 Evidence and confidence:
 
@@ -79,30 +83,14 @@ Evidence and confidence:
 - Include PubMed IDs, database names, and dataset references wherever possible.
 ---
 
-### Additional functionalities:
-
-- Dynamically choose the correct analytical function based on input type (e.g., gene list vs search term).
-- Detect and handle errors or inconsistencies gracefully; attempt retries or notify users clearly.
-- Maintain awareness of prior user interactions to provide contextually relevant responses.
-- Provide confidence levels or uncertainty estimates with every result.
-- Respect privacy and ethical standards in data handling and communication.
-- Explain your reasoning steps in detail and cite data sources when relevant.
-- Proactively suggest further analyses or alternative queries to deepen insights.
-- Encourage user feedback and clarify ambiguous requests to better tailor assistance.
-- Use rich visualizations (bar charts, enrichment plots, network graphs,
-  volcano plots, etc.) to enhance interpretability.
-- When data is numeric, categorical, or relational,
-  generate **visual summaries by default**.
-
----
-
 ### Pipeline (follow strictly):
 
+0. If user imput a csv file, use csv_record to register the file.
 1. Summarize the user's research problem and ask clarifying questions if needed.
-2. Request and load the dataset into a Pandas DataFrame.
+2. Request and load the dataset using csv_read.
 3. Run analysis tools in order:
     a. gsea_pipe or ora_pipe (based on dataset type)
-    b. enrich_rumma for top 30 genes by **ranking metric** (could be log2 fold-change, correlation, p-value, etc.) and explicitly mention leading genes from the top pathway
+    b. enrich_rumma for top 30 genes by ranking metric and mention leading genes from the top pathway
     c. gene_info for **leading genes from the top pathway**
     d. query_genes for **leading genes from the top pathway**
     e. Literature search: query_string_rumma, query_table_rumma, literature_trends
@@ -116,16 +104,16 @@ Evidence and confidence:
 
 - **query_genes**: Query Indra database for gene-gene relationships.
 - **count_edges**: Aggregate and count interactions by specified groupings.
-- **gsea_pipe**: Perform Gene Set Enrichment Analysis following the enrichment analysis guidelines.  
-- **ora_pipe**: Perform Over-Representation Analysis following the enrichment analysis guidelines.  
+- **gsea_pipe**: Perform Gene Set Enrichment Analysis following the enrichment analysis guidelines.
+- **ora_pipe**: Perform Over-Representation Analysis following the enrichment analysis guidelines.
 - **gene_info**: Get gene information, meaning symbol, name, summary and aliases.
 
 When interacting with the Rummagene API, you can access any or all of the following functions, depending on the input:
 
-- If the input is a **gene list**, use:  
+- If the input is a **gene list**, use:
     - **enrich_rumma**: Run Over Representation Analysis using Rummagene’s curated gene sets.
-        
-- If the input is **text or a search term** (e.g., disease name, phenotype, biological process), use this two tools in the following order:
+
+- If the input is text or a search term (e.g., disease name, phenotype, biological process), use in this order:
     - **query_string_rumma**: Search Rummagene for articles with matching gene sets.
     - **query_table_rumma**: Search Rummagene's curated gene set tables using keywords.
 
@@ -134,19 +122,19 @@ When interacting with the Rummagene API, you can access any or all of the follow
 
 - Searching existing literature:
 
-- **literature_trends**:  
-    - Plots a timeline of PubMed articles related to a term, showing research trends.  
-    - Always:  
-        1. Save the figure as a PNG file.  
-        2. Immediately re-read that PNG from disk and show it inline in the Beaker environment, using:  
+- **literature_trends**:
+    - Plots a timeline of PubMed articles related to a term, showing research trends.
+    - Always:
+        1. Save the figure as a PNG file.
+        2. Immediately re-read that PNG from disk and show it inline in the Beaker environment, using:
         ```python
         from IPython.display import Image, display
         display(Image(filename=save_path))
-        ```  
-    - The output to the user should contain:  
-        - A clean textual summary of results (key years, article counts, etc.).  
-        - The inline visualization (PNG loaded and displayed).  
-        - The file path where the PNG was saved (for reproducibility).  
+        ```
+    - The output to the user should contain:
+        - A clean textual summary of results (key years, article counts, etc.).
+        - The inline visualization (PNG loaded and displayed).
+        - The file path where the PNG was saved (for reproducibility).
     - If inline rendering fails, embed the PNG directly in Markdown with `![](path/to/file.png)`.
 
 - **prioritize_genes**: Prioritize genes based on a scoring function.
@@ -155,36 +143,210 @@ When interacting with the Rummagene API, you can access any or all of the follow
 
 ### Function-specific instructions
 
-- **gsea_pipe**:  
-    - Follow the enrichment analysis guidelines above.  
+- **gsea_pipe**:
+    - Follow the enrichment analysis guidelines above.
     - Show the output in this format:
 
-        | Pathway  | Enrichment Score | Normalized Enrichment Score | Nominal p-value | False Discovery Rate q-value | Family-Wise Error Rate p-value | Leading Edge Gene % | Pathway Overlap % | Lead_genes |
-        |---------|----------------:|----------------:|---------------:|----------------------------:|-------------------------------:|-----------------:|----------------:|------------|
+        | Pathway  | Enrichment Score | Normalized Enrichment Score |
+        | Nominal p-value | FDR q-value | FWER p-value |
+        | Leading Edge Gene % | Pathway Overlap % | Lead_genes |
+        |---------|----------------:|----------------:|
+        |---------------:|----------------:|---------------:|
+        |-----------------:|----------------:|------------|
 
     - Display:
-        - First the **overall top 3 results**
-        - Then **top 3 results per gene set library** used, in the same format.  
-    - Summarize: 
+        - First the overall top 3 results
+        - Then top 3 results per gene set library used, in the same format.
+    - Summarize:
         - Number of total pathways enriched above the `threshold`. Provide the exact count per pathway.
-        - Brief description of each column, including meaning of each column. 
-    - Show the results to the user after each function runs. Include all intermediate prints.  
+        - Brief description of each column, including meaning of each column.
+    - Show the results to the user after each function runs. Include all intermediate prints.
 
-- **ora_pipe**:  
-    - Follow the enrichment analysis guidelines above.  
+- **ora_pipe**:
+    - Follow the enrichment analysis guidelines above.
     - Show the output in this format:
 
         | Gene Set  | Term | Overlap | P-value | Adjusted P-value | Odds Ratio | Combined Score | Genes |
         |-----------|git-----|--------|--------:|----------------:|-----------:|---------------:|------|
 
-    - Display first the **overall top 3 results**, then **top 3 results per gene set library** used, in the same format.  
-    - Mention:  
+    - Display first the overall top 3 results, then top 3 results per gene set library used, in the same format.
+    - Mention:
         - Total pathways enriched above the `threshold`. Provide the exact count per pathway.
-        - Brief description of each column, including meaning of each column. 
-    - Show the results to the user after each function runs.  
+        - Brief description of each column, including meaning of each column.
+    - Show the results to the user after each function runs.
 
 ---
 """
+
+
+# =========================
+# Local storage helpers
+# =========================
+STORAGE_INDEX_PATH = os.path.join("output", "storage_index.json")
+
+
+def _ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+
+
+def _load_storage_index() -> list:
+    if not os.path.exists(STORAGE_INDEX_PATH):
+        _ensure_dir(os.path.dirname(STORAGE_INDEX_PATH))
+        with open(STORAGE_INDEX_PATH, "w", encoding="utf-8") as f:
+            json.dump([], f)
+        return []
+    try:
+        with open(STORAGE_INDEX_PATH, "r", encoding="utf-8") as f:
+            return json.load(f) or []
+    except Exception:
+        return []
+
+
+def _save_storage_index(entries: list) -> None:
+    _ensure_dir(os.path.dirname(STORAGE_INDEX_PATH))
+    with open(STORAGE_INDEX_PATH, "w", encoding="utf-8") as f:
+        json.dump(entries, f, indent=2)
+
+
+def _slugify(value: str) -> str:
+    safe = "".join(c if c.isalnum() or c in ("-", "_") else "-" for c in value.strip())
+    while "--" in safe:
+        safe = safe.replace("--", "-")
+    return safe.strip("-") or "file"
+
+
+def _is_text_ext(ext: str) -> bool:
+    return ext.lower() in {".txt", ".csv", ".tsv", ".json", ".md", ".yaml", ".yml"}
+
+
+def _register_file(
+    path: str,
+    category: str,
+    origin_tool: str | None = None,
+    tags: list[str] | None = None,
+    metadata: dict | None = None,
+) -> dict:
+    abs_path = str(Path(path).resolve())
+    p = Path(abs_path)
+    if not p.exists():
+        raise FileNotFoundError(f"File not found to register: {abs_path}")
+
+    # Build entry
+    stat = p.stat()
+    file_hash = hashlib.md5(abs_path.encode("utf-8")).hexdigest()[:8]
+    created_at = datetime.now().isoformat()
+    entry_id = f"{int(stat.st_mtime)}_{file_hash}"
+
+    entry = {
+        "id": entry_id,
+        "path": abs_path,
+        "name": p.name,
+        "ext": p.suffix.lower(),
+        "size_bytes": stat.st_size,
+        "mtime": stat.st_mtime,
+        "created_at": created_at,
+        "category": category,
+        "origin_tool": origin_tool,
+        "tags": tags or [],
+        "metadata": metadata or {},
+    }
+
+    entries = _load_storage_index()
+    # Replace if same path exists
+    entries = [e for e in entries if e.get("path") != abs_path]
+    entries.append(entry)
+    _save_storage_index(entries)
+    return entry
+
+
+def _filter_entries(
+    entries: list,
+    origin_tool: str | None = None,
+    tag: str | None = None,
+    ext: str | None = None,
+    category: str | None = None,
+    name_contains: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+) -> list:
+    def _match(e: dict) -> bool:
+        if origin_tool and e.get("origin_tool") != origin_tool:
+            return False
+        if tag and tag not in (e.get("tags") or []):
+            return False
+        if ext and e.get("ext") != (
+            ext.lower() if ext.startswith(".") else f".{ext.lower()}"
+        ):
+            return False
+        if category and e.get("category") != category:
+            return False
+        if name_contains and name_contains.lower() not in e.get("name", "").lower():
+            return False
+        if since:
+            try:
+                if e.get("created_at") < since:
+                    return False
+            except Exception:
+                pass
+        if until:
+            try:
+                if e.get("created_at") > until:
+                    return False
+            except Exception:
+                pass
+        return True
+
+    return [e for e in entries if _match(e)]
+
+
+def _read_file_content(entry: dict, with_content: bool, max_bytes: int) -> dict:
+    result = {**entry}
+    if not with_content:
+        return result
+    try:
+        path = entry.get("path")
+        if not path or not os.path.exists(path):
+            result["content_text"] = None
+            result["content_base64"] = None
+            result["truncated"] = False
+            return result
+        size = os.path.getsize(path)
+        truncated = size > max_bytes
+        mode = "r" if _is_text_ext(entry.get("ext", "")) else "rb"
+        if mode == "r":
+            with open(path, mode, encoding="utf-8", errors="ignore") as f:
+                data = f.read(max_bytes)
+            result["content_text"] = data
+            result["content_base64"] = None
+        else:
+            with open(path, mode) as f:
+                data = f.read(max_bytes)
+            result["content_text"] = None
+            result["content_base64"] = base64.b64encode(data).decode("utf-8")
+        result["truncated"] = truncated
+        return result
+    except Exception as e:
+        result["error"] = str(e)
+        return result
+
+
+def _resolve_path_from_id_or_path(
+    file_id: str | None, file_path: str | None
+) -> str | None:
+    """Resolve absolute file path from storage id or provided path."""
+    if file_id:
+        entries = _load_storage_index()
+        for e in entries:
+            if e.get("id") == file_id:
+                p = e.get("path")
+                return str(Path(p).resolve()) if p else None
+        raise FileNotFoundError(f"No entry with id {file_id}")
+    if file_path:
+        p = str(Path(file_path).resolve())
+        if not os.path.exists(p):
+            raise FileNotFoundError(f"File not found: {p}")
+        return p
+    return None
 
 
 def create_server():
@@ -192,6 +354,36 @@ def create_server():
         name="discovera_fastmcp",
         instructions=server_instructions,
     )
+
+    def _validate_params(params: Any, model_cls, tool_name: str):
+        """Coerce incoming params (dict or model) into model_cls or raise a clear error."""
+        if isinstance(params, model_cls):
+            return params
+        if isinstance(params, dict):
+            try:
+                return model_cls(**params)
+            except ValidationError as e:
+                # Keep message concise but actionable
+                raise ValueError(
+                    f"[{tool_name}] Invalid request parameters for {model_cls.__name__}: {e.errors()}"
+                )
+        raise TypeError(
+            f"[{tool_name}] Invalid parameter type: {type(params).__name__}. Expected dict or {model_cls.__name__}."
+        )
+
+    def _exception_payload(
+        tool_name: str, error: Exception, context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Return a structured error payload for tool outputs."""
+        return {
+            "error": {
+                "tool": tool_name,
+                "type": error.__class__.__name__,
+                "message": str(error),
+                "traceback": traceback.format_exc(),
+            },
+            "context": context or {},
+        }
 
     @mcp.tool()
     async def query_genes(params: QueryGenesInput) -> Dict[str, Any]:
@@ -203,6 +395,9 @@ def create_server():
                 - 'nodes', 'type', 'subj.name', 'obj.name', 'belief', 'text', 'text_refs.PMID',
                   'text_refs.DOI', 'text_refs.PMCID', 'text_refs.SOURCE', 'text_refs.READER', 'url'
         """
+        # Validate/construct params
+        params = _validate_params(params, QueryGenesInput, "query_genes")
+
         nodes = params.genes
         results = []
 
@@ -343,7 +538,7 @@ def create_server():
         that are significantly enriched in the data.
 
         Returns:
-            pd.DataFrame: A DataFrame containing the GSEA results, including,
+            A dictionary containing the GSEA results, including,
 
                 * Term: The biological pathway or process being tested for enrichment.
                 * Enrichment Score (ES): A measure of how strongly the genes in this pathway
@@ -376,49 +571,91 @@ def create_server():
             they will be automatically mapped to gene symbols before running GSEA.
         """
 
-        # Convert Pydantic models to DataFrame
-        dataset_df = pd.DataFrame([row.model_dump() for row in params.dataset])
+        # Validate/construct params
+        params = _validate_params(params, GseaPipeInput, "gsea_pipe")
 
-        data_sorted = dataset_df.sort_values(by=params.corr_col, ascending=False)
+        # Convert Pydantic models to DataFrame or load from CSV
+        try:
+            dataset_df = None
+            csv_abs_path = _resolve_path_from_id_or_path(params.csv_id, params.csv_path)
+            if not csv_abs_path:
+                raise ValueError("Provide dataset or csv_id/csv_path")
+            dataset_df = pd.read_csv(csv_abs_path)
+            data_sorted = dataset_df.sort_values(by=params.corr_col, ascending=False)
+            data_sorted.reset_index(drop=True, inplace=True)
+            rnk_data = data_sorted[[params.hit_col, params.corr_col]]
 
-        # Reset the index and drop the old index
-        data_sorted.reset_index(drop=True, inplace=True)
+            # Perform the prerank analysis
+            results = gp.prerank(
+                rnk=rnk_data,
+                gene_sets=params.gene_sets,
+                min_size=params.min_size,
+                max_size=params.max_size,
+                outdir=None,
+                verbose=True,
+            )
+            results = pd.DataFrame(results.res2d)
+            results[["Data Base", "Pathway"]] = results["Term"].str.split(
+                "__", expand=True
+            )
+            _ensure_dir("output")
+            raw_path = os.path.join("output", "gsea_results_raw.csv")
+            results.to_csv(raw_path, index=False)
+            try:
+                _register_file(
+                    raw_path,
+                    category="generated",
+                    origin_tool="gsea_pipe",
+                    tags=["gsea", "raw"],
+                    metadata={
+                        "hit_col": params.hit_col,
+                        "corr_col": params.corr_col,
+                    },
+                )
+            except Exception:
+                pass
 
-        # Ensure the correct columns remain
-        rnk_data = data_sorted[[params.hit_col, params.corr_col]]
+            pval_columns = [
+                col for col in results.columns if "p-val" in col or "q-val" in col
+            ]
+            results = results[results[pval_columns].lt(params.threshold).any(axis=1)]
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"output/filtered_results_{timestamp}.csv"
+            results.to_csv(filename, index=False)
+            try:
+                _register_file(
+                    filename,
+                    category="generated",
+                    origin_tool="gsea_pipe",
+                    tags=["gsea", "filtered"],
+                    metadata={"threshold": params.threshold},
+                )
+            except Exception:
+                pass
+            logger.info(
+                (
+                    f"[gsea_pipe] Number of matching results with p-val smaller than "
+                    f"{params.threshold}: {len(results)}"
+                )
+            )
+            top_high_nes = results.sort_values(by="NES", ascending=False).head(10)
+            top_low_nes = results.sort_values(by="NES", ascending=True).head(10)
+            top_combined = pd.concat([top_high_nes, top_low_nes]).drop_duplicates()
 
-        # Perform the prerank analysis
-        results = gp.prerank(
-            rnk=rnk_data,
-            gene_sets=params.gene_sets,
-            min_size=params.min_size,
-            max_size=params.max_size,
-            outdir=None,
-            verbose=True,
-        )
-        results = pd.DataFrame(results.res2d)
-        # Automatically select all columns containing 'p-val'
-        pval_columns = [
-            col for col in results.columns if "p-val" in col or "q-val" in col
-        ]
-        # Filter rows where any 'p-val' column is greater than the threshold
-        results = results[results[pval_columns].lt(params.threshold).any(axis=1)]
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"filtered_results_{timestamp}.csv"
-        # Save to CSV
-        results.to_csv(filename, index=False)
-        logger.info(
-            f"[gsea_pipe] Number of matching results with p-val smaller than {params.threshold}: {len(results)}"
-        )
-        # Display the filtered DataFrame
-        top_high_nes = results.sort_values(by="NES", ascending=False).head(10)
+            plot_gsea_results(top_combined, timestamp)
 
-        # Select top N lowest NES
-        top_low_nes = results.sort_values(by="NES", ascending=True).head(10)
-
-        # Combine the two sets
-        top_combined = pd.concat([top_high_nes, top_low_nes]).drop_duplicates()
-        return top_combined.to_dict()
+            return results.to_dict()
+        except Exception as e:
+            context = {
+                "dataset": params.csv_id or params.csv_path,
+                "hit_col": params.hit_col,
+                "corr_col": params.corr_col,
+                "gene_sets": params.gene_sets,
+                "min_size": params.min_size,
+                "max_size": params.max_size,
+                "threshold": params.threshold,
+            }
+            return _exception_payload("gsea_pipe", e, context)
 
     @mcp.tool()
     async def ora_pipe(params: OraPipeInput) -> Dict[str, Any]:
@@ -440,33 +677,65 @@ def create_server():
                 - Combined Score: The combined score of the gene set.
                 - Genes: The genes in the gene set.
         """
+        # Validate/construct params
+        params = _validate_params(params, OraPipeInput, "ora_pipe")
+
         # Drop NA values in the gene column
-        genes = params.genes
-        print(genes)
-        # Run enrichment
-        enr = gp.enrichr(
-            gene_list=genes,
-            gene_sets=params.gene_sets,
-            organism="human",
-            outdir=None,
-            verbose=True,
-        )
+        try:
+            genes = []
 
-        # Convert to DataFrame
-        results = pd.DataFrame(enr.results)
-
-        print(f"Number of matching results: {len(results)}")
-
-        return results.to_dict()
+            csv_abs_path = _resolve_path_from_id_or_path(params.csv_id, params.csv_path)
+            if not csv_abs_path:
+                raise ValueError("Provide genes or csv_id/csv_path")
+            df_genes = pd.read_csv(csv_abs_path)
+            gene_col = params.gene_col or "gene"
+            if gene_col not in df_genes.columns:
+                raise ValueError(f"Column '{gene_col}' not found in CSV")
+            genes = df_genes[gene_col].dropna().astype(str).tolist()
+            # Run enrichment
+            enr = gp.enrichr(
+                gene_list=genes,
+                gene_sets=params.gene_sets,
+                organism="human",
+                outdir=None,
+                verbose=True,
+            )
+            results = pd.DataFrame(enr.results)
+            print(f"Number of matching results: {len(results)}")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"output/ora_results_{timestamp}.csv"
+            results.to_csv(filename, index=False)
+            try:
+                _register_file(
+                    filename,
+                    category="generated",
+                    origin_tool="ora_pipe",
+                    tags=["ora", "results"],
+                    metadata={"timestamp": timestamp},
+                )
+            except Exception:
+                pass
+            print("ORA results saved to", filename)
+            return results.to_dict()
+        except Exception as e:
+            context = {
+                "num_genes": len(genes),
+                "gene_sets": params.gene_sets,
+            }
+            return _exception_payload("ora_pipe", e, context)
 
     @mcp.tool()
     async def enrich_rumma(params: EnrichRummaInput) -> Dict[str, Any]:
         """
         Performs enrichment using the Rummagene GraphQL API for a list of genes.
         """
+        # Validate/construct params
+        params = _validate_params(params, EnrichRummaInput, "enrich_rumma")
+
         df = enrich_query(
             params.genes, first=params.first, max_records=params.max_records
         )
+        logger.info("🛠️[enrich_rumma] Enrichment fetched successfully")
         return df.to_dict()
 
     @mcp.tool()
@@ -474,6 +743,9 @@ def create_server():
         """
         Searches PubMed and maps articles to gene sets in Rummagene.
         """
+        # Validate/construct params
+        params = _validate_params(params, QueryStringRummaInput, "query_string_rumma")
+
         pmc_ids = rumm_search_pubmed(params.term, retmax=params.retmax)
         pmcs_with_prefix = ["PMC" + pmc for pmc in pmc_ids]
         articles = fetch_pmc_info(pmcs_with_prefix)
@@ -486,6 +758,7 @@ def create_server():
         merged = articles.merge(sets_art, how="left", on="pmcid")
         # Preserve original order
         merged = merged.set_index("pmcid").loc[articles["pmcid"]].reset_index()
+        logger.info("🛠️[query_string_rumm] Query string fetched successfully")
         return merged.to_dict()
 
     @mcp.tool()
@@ -493,11 +766,15 @@ def create_server():
         """
         Searches gene set tables in Rummagene by a term and extracts PMCIDs.
         """
+        # Validate/construct params
+        params = _validate_params(params, QueryTableRummaInput, "query_table_rumma")
+
         df = table_search_query(params.term)
         if df.empty or "term" not in df.columns:
             return {}
         df["pmcid"] = df["term"].str.extract(r"(PMC\d+)")
         df["term"] = df["term"].str.replace(r"PMC\d+-?", "", regex=True)
+        logger.info("🛠️[query_table_rumm] Query table fetched successfully")
         return df.to_dict()
 
     @mcp.tool()
@@ -505,7 +782,11 @@ def create_server():
         """
         Retrieves detailed gene membership and annotations for a gene set.
         """
+        # Validate/construct params
+        params = _validate_params(params, SetsInfoRummInput, "sets_info_rumm")
+
         df = genes_query(params.gene_set_id)
+        logger.info("🛠️[sets_info_rumm] Sets info fetched successfully")
         return df.to_dict()
 
     @mcp.tool()
@@ -513,11 +794,27 @@ def create_server():
         """
         Plots a publication timeline and returns year-to-IDs map and image path.
         """
+        # Validate/construct params
+        params = _validate_params(params, LiteratureTrendsInput, "literature_trends")
+
         year_to_ids, save_path = literature_timeline(
             term=params.term,
             email=params.email,
             batch_size=params.batch_size,
         )
+        # Register the saved plot if present
+        try:
+            if save_path and os.path.exists(save_path):
+                _register_file(
+                    save_path,
+                    category="generated",
+                    origin_tool="literature_trends",
+                    tags=["literature", "plot"],
+                    metadata={"term": params.term},
+                )
+        except Exception:
+            pass
+        logger.info("🛠️[literature_trends] Literature trends fetched successfully")
         return {"year_to_ids": year_to_ids or {}, "image_path": save_path}
 
     @mcp.tool()
@@ -525,8 +822,12 @@ def create_server():
         """
         Prioritizes genes in the context of a disease or phenotype.
         """
+        # Validate/construct params
+        params = _validate_params(params, PrioritizeGenesInput, "prioritize_genes")
+
         email = params.email or "test@example.com"
         df = prioritize_genes_fn(params.gene_list, params.context_term, email=email)
+        logger.info("🛠️[prioritize_genes] Prioritized genes fetched successfully")
         return df.to_dict()
 
     @mcp.tool()
@@ -534,9 +835,187 @@ def create_server():
         """
         Fetches gene annotations from MyGene.info for a list of gene symbols.
         """
+        # Validate/construct params
+        params = _validate_params(params, GeneInfoInput, "gene_info")
+
         parsed = [g.strip() for g in params.gene_list if g.strip()]
         df = fetch_gene_annota(parsed)
+
+        logger.info("🛠️[gene_info] Gene info fetched successfully")
         return df.to_dict()
+
+    # =========================
+    # Local storage tools
+    # =========================
+
+    @mcp.tool()
+    async def storage_list(params: StorageListInput) -> Dict[str, Any]:
+        """
+        List stored files with optional filters; optionally include content preview.
+        """
+        try:
+            entries = _load_storage_index()
+            filtered = _filter_entries(
+                entries,
+                origin_tool=params.origin_tool,
+                tag=params.tag,
+                ext=params.ext,
+                category=params.category,
+                name_contains=params.name_contains,
+                since=params.since,
+                until=params.until,
+            )
+            if params.with_content:
+                enriched = [
+                    _read_file_content(
+                        e,
+                        with_content=True,
+                        max_bytes=int(params.max_bytes or 1048576),
+                    )
+                    for e in filtered
+                ]
+                logger.info("🛠️[storage_list] %d enriched files found", len(enriched))
+                return {"items": enriched}
+            logger.info("🛠️[storage_list] %d files found", len(filtered))
+            return {"items": filtered}
+        except Exception as e:
+            return _exception_payload("storage_list", e, {})
+
+    @mcp.tool()
+    async def storage_get(params: StorageGetInput) -> Dict[str, Any]:
+        """
+        Retrieve a stored file entry by id or path; optionally include content.
+        """
+        try:
+            entries = _load_storage_index()
+            entry = None
+            if params.id:
+                for e in entries:
+                    if e.get("id") == params.id:
+                        entry = e
+                        break
+                if not entry:
+                    raise FileNotFoundError(f"No entry with id {params.id}")
+            elif params.path:
+                abs_path = str(Path(params.path).resolve())
+                for e in entries:
+                    if e.get("path") == abs_path:
+                        entry = e
+                        break
+                if not entry:
+                    # Allow returning minimal entry for paths not yet registered
+                    if not os.path.exists(abs_path):
+                        raise FileNotFoundError(f"File not found: {abs_path}")
+                    p = Path(abs_path)
+                    entry = {
+                        "id": None,
+                        "path": abs_path,
+                        "name": p.name,
+                        "ext": p.suffix.lower(),
+                        "size_bytes": p.stat().st_size,
+                        "mtime": p.stat().st_mtime,
+                        "created_at": None,
+                        "category": None,
+                        "origin_tool": None,
+                        "tags": [],
+                        "metadata": {},
+                    }
+            else:
+                raise ValueError("Provide id or path")
+
+            if params.with_content:
+                logger.info("🛠️[storage_get] Reading content for %s", entry["path"])
+                content = _read_file_content(
+                    entry, with_content=True, max_bytes=int(params.max_bytes or 1048576)
+                )
+                logger.info("🛠️[storage_get] Content read successfully")
+                return content
+            logger.info("🛠️[storage_get] Returning minimal entry for %s", entry["path"])
+            return entry
+        except Exception as e:
+            return _exception_payload(
+                "storage_get", e, {"id": params.id, "path": params.path}
+            )
+
+    @mcp.tool()
+    async def csv_record(params: CsvRecordInput) -> Dict[str, Any]:
+        """
+        Record a user-provided CSV into output/user_csvs and register it.
+        """
+        try:
+            if (params.csv_text is None) == (params.csv_base64 is None):
+                raise ValueError("Provide exactly one of csv_text or csv_base64")
+
+            base_dir = os.path.join("output", "user_csvs")
+            _ensure_dir(base_dir)
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            if params.name:
+                base = _slugify(params.name)
+            else:
+                base = "user_input"
+            filename = f"{base}_{timestamp}.csv"
+            abs_path = os.path.join(base_dir, filename)
+
+            if params.csv_text is not None:
+                with open(abs_path, "w", encoding="utf-8") as f:
+                    f.write(params.csv_text)
+            else:
+                raw = base64.b64decode(params.csv_base64)
+                with open(abs_path, "wb") as f:
+                    f.write(raw)
+
+            tags = ["csv", "user_input"] + (params.tags or [])
+            entry = _register_file(
+                abs_path,
+                category="user_input",
+                origin_tool="csv_record",
+                tags=tags,
+                metadata=params.metadata or {},
+            )
+            logger.info("🛠️[csv_record] CSV file registered successfully: %s", abs_path)
+            return entry
+        except Exception as e:
+            return _exception_payload("csv_record", e, {"name": params.name})
+
+    @mcp.tool()
+    async def csv_read(params: CsvReadInput) -> Dict[str, Any]:
+        """
+        Read a stored CSV by id or path and return a preview of rows.
+        """
+        try:
+            target_path = None
+            if params.id:
+                entries = _load_storage_index()
+                for e in entries:
+                    if e.get("id") == params.id:
+                        target_path = e.get("path")
+                        break
+                if not target_path:
+                    raise FileNotFoundError(f"No entry with id {params.id}")
+            elif params.path:
+                target_path = params.path
+            else:
+                raise ValueError("Provide id or path")
+
+            abs_path = str(Path(target_path).resolve())
+            if not os.path.exists(abs_path):
+                raise FileNotFoundError(f"File not found: {abs_path}")
+
+            df = pd.read_csv(abs_path)
+            n = int(params.n_rows or 20)
+            head = df.head(n)
+            logger.info("🛠️[csv_read] CSV file read successfully: %s", abs_path)
+            return {
+                "path": abs_path,
+                "columns": list(head.columns),
+                "rows": head.to_dict(orient="records"),
+                "total_rows": int(len(df)),
+            }
+        except Exception as e:
+            return _exception_payload(
+                "csv_read", e, {"id": params.id, "path": params.path}
+            )
 
     return mcp
 
