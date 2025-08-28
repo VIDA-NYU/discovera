@@ -10,6 +10,8 @@ import os
 import json
 import base64
 import hashlib
+import requests
+import io
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -93,8 +95,8 @@ Evidence and confidence:
     b. enrich_rumma for top 30 genes by ranking metric and mention leading genes from the top pathway
     c. gene_info for **leading genes from the top pathway**
     d. query_genes for **leading genes from the top pathway**
-    e. Literature search: query_string_rumma, query_table_rumma, literature_trends
-4. Summarize results in tables and figures; include parameters, assumptions, and confidence.
+    e. **Literature search**: query_string_rumma, query_table_rumma, literature_trends
+4. Summarize results; include parameters, assumptions, and confidence.
 5. Provide references including PubMed IDs and database links.
 6. Generate a final report using Toulmin’s model (claims, grounds, warrants, qualifiers, rebuttals).
 - Include all references and links.
@@ -102,42 +104,26 @@ Evidence and confidence:
 
 ### Functions:
 
+- **csv_record**: Register a CSV file in the local storage index.
+- **csv_read**: Read a CSV file from the local storage index.
+- **storage_list**: List all files in the local storage index.
+- **storage_get**: Get a file from the local storage index.
+
 - **query_genes**: Query Indra database for gene-gene relationships.
 - **count_edges**: Aggregate and count interactions by specified groupings.
 - **gsea_pipe**: Perform Gene Set Enrichment Analysis following the enrichment analysis guidelines.
 - **ora_pipe**: Perform Over-Representation Analysis following the enrichment analysis guidelines.
 - **gene_info**: Get gene information, meaning symbol, name, summary and aliases.
-
+- **literature_trends**: Plots a timeline of PubMed articles related to a term, showing research trends.
+- **prioritize_genes**: Prioritize genes based on a scoring function.
 When interacting with the Rummagene API, you can access any or all of the following functions, depending on the input:
-
 - If the input is a **gene list**, use:
     - **enrich_rumma**: Run Over Representation Analysis using Rummagene’s curated gene sets.
-
 - If the input is text or a search term (e.g., disease name, phenotype, biological process), use in this order:
     - **query_string_rumma**: Search Rummagene for articles with matching gene sets.
     - **query_table_rumma**: Search Rummagene's curated gene set tables using keywords.
-
 - For functional summaries and metadata of any gene set, use:
     - **sets_info_rumm**: Retrieve detailed descriptions and biological context.
-
-- Searching existing literature:
-
-- **literature_trends**:
-    - Plots a timeline of PubMed articles related to a term, showing research trends.
-    - Always:
-        1. Save the figure as a PNG file.
-        2. Immediately re-read that PNG from disk and show it inline in the Beaker environment, using:
-        ```python
-        from IPython.display import Image, display
-        display(Image(filename=save_path))
-        ```
-    - The output to the user should contain:
-        - A clean textual summary of results (key years, article counts, etc.).
-        - The inline visualization (PNG loaded and displayed).
-        - The file path where the PNG was saved (for reproducibility).
-    - If inline rendering fails, embed the PNG directly in Markdown with `![](path/to/file.png)`.
-
-- **prioritize_genes**: Prioritize genes based on a scoring function.
 
 ---
 
@@ -167,7 +153,7 @@ When interacting with the Rummagene API, you can access any or all of the follow
     - Show the output in this format:
 
         | Gene Set  | Term | Overlap | P-value | Adjusted P-value | Odds Ratio | Combined Score | Genes |
-        |-----------|git-----|--------|--------:|----------------:|-----------:|---------------:|------|
+        |-----------|-----|--------|--------:|----------------:|-----------:|---------------:|------|
 
     - Display first the overall top 3 results, then top 3 results per gene set library used, in the same format.
     - Mention:
@@ -330,9 +316,7 @@ def _read_file_content(entry: dict, with_content: bool, max_bytes: int) -> dict:
         return result
 
 
-def _resolve_path_from_id_or_path(
-    file_id: str | None, file_path: str | None
-) -> str | None:
+def _resolve_path_from_id(file_id: str | None) -> str | None:
     """Resolve absolute file path from storage id or provided path."""
     if file_id:
         entries = _load_storage_index()
@@ -341,11 +325,6 @@ def _resolve_path_from_id_or_path(
                 p = e.get("path")
                 return str(Path(p).resolve()) if p else None
         raise FileNotFoundError(f"No entry with id {file_id}")
-    if file_path:
-        p = str(Path(file_path).resolve())
-        if not os.path.exists(p):
-            raise FileNotFoundError(f"File not found: {p}")
-        return p
     return None
 
 
@@ -355,13 +334,31 @@ def create_server():
         instructions=server_instructions,
     )
 
+    def _coalesce_none_defaults(model_obj: Any) -> Any:
+        """Replace None values with field defaults for pydantic v2 models."""
+        try:
+            fields = getattr(model_obj.__class__, "model_fields", {})
+            for field_name, field in fields.items():
+                current_value = getattr(model_obj, field_name, None)
+                if current_value is None:
+                    if getattr(field, "default", None) is not None:
+                        setattr(model_obj, field_name, field.default)
+                    else:
+                        default_factory = getattr(field, "default_factory", None)
+                        if callable(default_factory):
+                            setattr(model_obj, field_name, default_factory())
+        except Exception:
+            pass
+        return model_obj
+
     def _validate_params(params: Any, model_cls, tool_name: str):
         """Coerce incoming params (dict or model) into model_cls or raise a clear error."""
         if isinstance(params, model_cls):
-            return params
+            return _coalesce_none_defaults(params)
         if isinstance(params, dict):
             try:
-                return model_cls(**params)
+                model_obj = model_cls(**params)
+                return _coalesce_none_defaults(model_obj)
             except ValidationError as e:
                 # Keep message concise but actionable
                 raise ValueError(
@@ -538,8 +535,8 @@ def create_server():
         that are significantly enriched in the data.
 
         Returns:
-            A dictionary containing the GSEA results, including,
-
+            A dictionary containing the GSEA top 10 high NES and low NES results, and the full result metadata.
+            Key attributes:
                 * Term: The biological pathway or process being tested for enrichment.
                 * Enrichment Score (ES): A measure of how strongly the genes in this pathway
                     are enriched in your ranked gene list.
@@ -577,7 +574,7 @@ def create_server():
         # Convert Pydantic models to DataFrame or load from CSV
         try:
             dataset_df = None
-            csv_abs_path = _resolve_path_from_id_or_path(params.csv_id, params.csv_path)
+            csv_abs_path = _resolve_path_from_id(params.csv_id)
             if not csv_abs_path:
                 raise ValueError("Provide dataset or csv_id/csv_path")
             dataset_df = pd.read_csv(csv_abs_path)
@@ -599,21 +596,21 @@ def create_server():
                 "__", expand=True
             )
             _ensure_dir("output")
-            raw_path = os.path.join("output", "gsea_results_raw.csv")
-            results.to_csv(raw_path, index=False)
-            try:
-                _register_file(
-                    raw_path,
-                    category="generated",
-                    origin_tool="gsea_pipe",
-                    tags=["gsea", "raw"],
-                    metadata={
-                        "hit_col": params.hit_col,
-                        "corr_col": params.corr_col,
-                    },
-                )
-            except Exception:
-                pass
+            # raw_path = os.path.join("output", "gsea_results_raw.csv")
+            # results.to_csv(raw_path, index=False)
+            # try:
+            #     _register_file(
+            #         raw_path,
+            #         category="generated",
+            #         origin_tool="gsea_pipe",
+            #         tags=["gsea", "raw"],
+            #         metadata={
+            #             "hit_col": params.hit_col,
+            #             "corr_col": params.corr_col,
+            #         },
+            #     )
+            # except Exception:
+            #     pass
 
             pval_columns = [
                 col for col in results.columns if "p-val" in col or "q-val" in col
@@ -623,7 +620,7 @@ def create_server():
             filename = f"output/filtered_results_{timestamp}.csv"
             results.to_csv(filename, index=False)
             try:
-                _register_file(
+                gsea_result_metadata = _register_file(
                     filename,
                     category="generated",
                     origin_tool="gsea_pipe",
@@ -644,10 +641,14 @@ def create_server():
 
             plot_gsea_results(top_combined, timestamp)
 
-            return results.to_dict()
+            return {
+                "top_high_nes": top_high_nes.to_dict(),
+                "top_low_nes": top_low_nes.to_dict(),
+                "gsea_result_metadata": gsea_result_metadata,
+            }
         except Exception as e:
             context = {
-                "dataset": params.csv_id or params.csv_path,
+                "dataset": params.csv_id,
                 "hit_col": params.hit_col,
                 "corr_col": params.corr_col,
                 "gene_sets": params.gene_sets,
@@ -683,10 +684,9 @@ def create_server():
         # Drop NA values in the gene column
         try:
             genes = []
-
-            csv_abs_path = _resolve_path_from_id_or_path(params.csv_id, params.csv_path)
+            csv_abs_path = _resolve_path_from_id(params.csv_id)
             if not csv_abs_path:
-                raise ValueError("Provide genes or csv_id/csv_path")
+                raise ValueError("Provide csv_id")
             df_genes = pd.read_csv(csv_abs_path)
             gene_col = params.gene_col or "gene"
             if gene_col not in df_genes.columns:
@@ -706,7 +706,7 @@ def create_server():
             filename = f"output/ora_results_{timestamp}.csv"
             results.to_csv(filename, index=False)
             try:
-                _register_file(
+                ora_result_metadata = _register_file(
                     filename,
                     category="generated",
                     origin_tool="ora_pipe",
@@ -716,7 +716,10 @@ def create_server():
             except Exception:
                 pass
             print("ORA results saved to", filename)
-            return results.to_dict()
+            return {
+                "ora_results": results.to_dict(),
+                "ora_result_metadata": ora_result_metadata,
+            }
         except Exception as e:
             context = {
                 "num_genes": len(genes),
@@ -896,32 +899,8 @@ def create_server():
                         break
                 if not entry:
                     raise FileNotFoundError(f"No entry with id {params.id}")
-            elif params.path:
-                abs_path = str(Path(params.path).resolve())
-                for e in entries:
-                    if e.get("path") == abs_path:
-                        entry = e
-                        break
-                if not entry:
-                    # Allow returning minimal entry for paths not yet registered
-                    if not os.path.exists(abs_path):
-                        raise FileNotFoundError(f"File not found: {abs_path}")
-                    p = Path(abs_path)
-                    entry = {
-                        "id": None,
-                        "path": abs_path,
-                        "name": p.name,
-                        "ext": p.suffix.lower(),
-                        "size_bytes": p.stat().st_size,
-                        "mtime": p.stat().st_mtime,
-                        "created_at": None,
-                        "category": None,
-                        "origin_tool": None,
-                        "tags": [],
-                        "metadata": {},
-                    }
             else:
-                raise ValueError("Provide id or path")
+                raise ValueError("Provide id")
 
             if params.with_content:
                 logger.info("🛠️[storage_get] Reading content for %s", entry["path"])
@@ -933,9 +912,7 @@ def create_server():
             logger.info("🛠️[storage_get] Returning minimal entry for %s", entry["path"])
             return entry
         except Exception as e:
-            return _exception_payload(
-                "storage_get", e, {"id": params.id, "path": params.path}
-            )
+            return _exception_payload("storage_get", e, {"id": params.id})
 
     @mcp.tool()
     async def csv_record(params: CsvRecordInput) -> Dict[str, Any]:
@@ -943,35 +920,95 @@ def create_server():
         Record a user-provided CSV into output/user_csvs and register it.
         """
         try:
-            if (params.csv_text is None) == (params.csv_base64 is None):
-                raise ValueError("Provide exactly one of csv_text or csv_base64")
+            # Determine exactly one source of CSV content
+            provided_sources = {
+                "csv_text": params.csv_text,
+                "csv_base64": params.csv_base64,
+                "csv_path": params.csv_path,
+                "csv_url": getattr(params, "csv_url", None),
+            }
+            provided = [k for k, v in provided_sources.items() if v]
+            if len(provided) == 0:
+                raise ValueError(
+                    "Provide exactly one of csv_text, csv_base64, csv_path, or csv_url"
+                )
+            if len(provided) > 1:
+                raise ValueError(
+                    f"Multiple inputs provided: {provided}. Provide only one of csv_text, csv_base64, csv_path, csv_url"
+                )
 
+            source = provided[0]
+            normalized_csv_text = None
+
+            if source == "csv_text":
+                text = str(params.csv_text)
+                if not text.strip():
+                    raise ValueError("csv_text is empty")
+                try:
+                    df = pd.read_csv(io.StringIO(text))
+                except Exception as e:
+                    raise ValueError(f"csv_text is not a valid CSV: {e}")
+                normalized_csv_text = df.to_csv(index=False)
+
+            elif source == "csv_base64":
+                try:
+                    raw = base64.b64decode(params.csv_base64)
+                    text = raw.decode("utf-8")
+                except Exception as e:
+                    raise ValueError(f"Invalid base64 CSV (must be UTF-8 text): {e}")
+                try:
+                    df = pd.read_csv(io.StringIO(text))
+                except Exception as e:
+                    raise ValueError(f"Decoded base64 is not a valid CSV: {e}")
+                normalized_csv_text = df.to_csv(index=False)
+
+            elif source == "csv_path":
+                abs_in_path = str(Path(params.csv_path).resolve())
+                if not os.path.exists(abs_in_path):
+                    raise FileNotFoundError(f"File not found: {abs_in_path}")
+                try:
+                    df = pd.read_csv(abs_in_path)
+                except Exception as e:
+                    raise ValueError(f"Failed to read CSV from path: {e}")
+                normalized_csv_text = df.to_csv(index=False)
+
+            elif source == "csv_url":
+                try:
+                    response = requests.get(params.csv_url, timeout=20)
+                    response.raise_for_status()
+                    df = pd.read_csv(io.StringIO(response.text))
+                except Exception as e:
+                    raise ValueError(f"Failed to read CSV from URL: {e}")
+                normalized_csv_text = df.to_csv(index=False)
+
+            # Ensure output directory exists
             base_dir = os.path.join("output", "user_csvs")
             _ensure_dir(base_dir)
 
+            # Build filename
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            if params.name:
-                base = _slugify(params.name)
-            else:
-                base = "user_input"
-            filename = f"{base}_{timestamp}.csv"
+            filename = f"user_input_{timestamp}.csv"
             abs_path = os.path.join(base_dir, filename)
 
-            if params.csv_text is not None:
-                with open(abs_path, "w", encoding="utf-8") as f:
-                    f.write(params.csv_text)
-            else:
-                raw = base64.b64decode(params.csv_base64)
-                with open(abs_path, "wb") as f:
-                    f.write(raw)
+            # Persist normalized CSV text
+            with open(abs_path, "w", encoding="utf-8") as f:
+                f.write(normalized_csv_text)
 
+            # Register entry
             tags = ["csv", "user_input"] + (params.tags or [])
+            metadata = dict(params.metadata or {})
+            metadata.update({"source": source})
+            if source == "csv_url":
+                metadata["csv_url"] = params.csv_url
+            if source == "csv_path":
+                metadata["csv_path"] = str(Path(params.csv_path).resolve())
+
             entry = _register_file(
                 abs_path,
                 category="user_input",
                 origin_tool="csv_record",
                 tags=tags,
-                metadata=params.metadata or {},
+                metadata=metadata,
             )
             logger.info("🛠️[csv_record] CSV file registered successfully: %s", abs_path)
             return entry
@@ -993,10 +1030,8 @@ def create_server():
                         break
                 if not target_path:
                     raise FileNotFoundError(f"No entry with id {params.id}")
-            elif params.path:
-                target_path = params.path
             else:
-                raise ValueError("Provide id or path")
+                raise ValueError("Provide id")
 
             abs_path = str(Path(target_path).resolve())
             if not os.path.exists(abs_path):

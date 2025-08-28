@@ -19,16 +19,9 @@ The correlation or scoring value of the gene.
 
 
 class GseaPipeInput(BaseModel):
-    csv_id: Optional[str] = Field(
-        default=None,
+    csv_id: str = Field(
         description="""
-ID of a stored CSV entry (preferred). If provided, the server will load data from this CSV.
-""",
-    )
-    csv_path: Optional[str] = Field(
-        default=None,
-        description="""
-Absolute path to a CSV to read if id is not provided.
+ID of a stored CSV entry (required).
 """,
     )
     gene_sets: Optional[List[str]] = Field(
@@ -90,6 +83,7 @@ class QueryGenesInput(BaseModel):
     genes: List[str] = Field(
         description="""
 A list of gene names to query in Indra.
+**Do not exceed 10 genes at a time for performance reasons!**
 """
     )
     size: int = Field(
@@ -100,16 +94,9 @@ The size of the gene combinations. Defaults to 2.
 
 
 class OraPipeInput(BaseModel):
-    csv_id: Optional[str] = Field(
-        default=None,
+    csv_id: str = Field(
         description="""
-ID of a stored CSV entry. If provided, genes will be read from this CSV.
-""",
-    )
-    csv_path: Optional[str] = Field(
-        default=None,
-        description="""
-Absolute path to a CSV to read if id is not provided.
+ID of a stored CSV entry (required).
 """,
     )
     gene_col: Optional[str] = Field(
@@ -291,16 +278,9 @@ Maximum number of bytes to read when including content.
 
 
 class StorageGetInput(BaseModel):
-    id: Optional[str] = Field(
-        default=None,
+    id: str = Field(
         description="""
-ID of the stored entry (preferred). If not provided, path must be provided.
-""",
-    )
-    path: Optional[str] = Field(
-        default=None,
-        description="""
-Absolute path to the file. Used if id is not provided.
+ID of the stored entry (required).
 """,
     )
     with_content: Optional[bool] = Field(
@@ -331,6 +311,18 @@ CSV content as text. Mutually exclusive with csv_base64.
 CSV content as base64. Mutually exclusive with csv_text.
 """,
     )
+    csv_path: Optional[str] = Field(
+        default=None,
+        description="""
+Absolute path to a CSV file to read. If the file is too big but can be accessed by local read, use this field.
+""",
+    )
+    csv_url: Optional[str] = Field(
+        default=None,
+        description="""
+URL to a CSV file to read. If the file is too big but can be accessed by web read, use this field.
+""",
+    )
     tags: Optional[List[str]] = Field(
         default=None,
         description="""
@@ -346,16 +338,9 @@ Arbitrary metadata to store (e.g., source, description).
 
 
 class CsvReadInput(BaseModel):
-    id: Optional[str] = Field(
-        default=None,
+    id: str = Field(
         description="""
-ID of a stored CSV entry. If not provided, path must be provided.
-""",
-    )
-    path: Optional[str] = Field(
-        default=None,
-        description="""
-Absolute path to a CSV file to read.
+ID of a stored CSV entry (required).
 """,
     )
     n_rows: Optional[int] = Field(
