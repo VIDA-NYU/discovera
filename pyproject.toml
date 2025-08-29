@@ -32,7 +32,9 @@ dependencies = [
   "vega3",
   "notebook",  # Added for rendering HTML
   "biopython", 
-  "mygene" # gene information
+  "mygene", # gene information
+  "pydantic",
+  "Bio"
 ]
 
 [project.urls]
