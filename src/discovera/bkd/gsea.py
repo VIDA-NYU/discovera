@@ -1,8 +1,12 @@
 import gseapy as gp
 import pandas as pd
 import matplotlib.pyplot as plt
-from datetime import datetime
 import os
+import mygene
+import re
+
+from datetime import datetime
+
 
 # =========================
 # Utility helpers
@@ -97,70 +101,152 @@ def plot_gsea_results(
 # =========================
 # Analysis functions
 # =========================
-def rank_gsea(
-        dataset, 
-        gene_sets,
-        hit_col,
-        corr_col,
-        min_size, 
-        max_size,
-        threshold,
-        timestamp=get_timestamp()
-    ):
+
+def detect_id_type(ids):
+    """Quick heuristic — mainly for info, not strict enforcement."""
+    sample = list(map(str, ids[:10]))
+    if any(x.startswith(("ENSG","ENSMUSG","ENST","ENSMUST","ENSP","ENSMUSP")) for x in sample):
+        return "ensembl.gene"
+    elif all(x.isdigit() for x in sample):
+        return "entrezgene"
+    elif any(x.startswith(("NM_","NR_")) for x in sample):
+        return "refseq"
+    elif any(re.match(r"^[OPQ][0-9][A-Z0-9]{3,}", x) for x in sample):
+        return "uniprot"
+    else:
+        return "symbol"
+
+def map_to_symbol(df, gene_col, default_species="human"):
+    # strip Ensembl version suffix if present
+    df[gene_col] = df[gene_col].astype(str).str.replace(r"\.\d+$", "", regex=True)
+    ids = df[gene_col].tolist()
+
+    # Instead of detecting a single type, allow mixed IDs
+    possible_scopes = ["ensembl.gene", "entrezgene", "refseq", "uniprot", "symbol"]
+
+    mg = mygene.MyGeneInfo()
+    mapping = mg.querymany(
+        ids,
+        scopes=possible_scopes,      # let mygene resolve mixed types
+        fields="symbol",
+        species=default_species,
+        as_dataframe=True
+    ).reset_index()
+
+    # keep only useful mappings
+    mapping = mapping[["query", "symbol"]].dropna().drop_duplicates()
+
+    # merge back with df
+    df_merged = df.merge(mapping, left_on=gene_col, right_on="query", how="left")
+
+    return df_merged
+
+
+def rank_gsea(dataset, gene_sets, hit_col, corr_col,
+              min_size=5, max_size=200, threshold=0.05, timestamp=None):
+    if timestamp is None:
+        timestamp = get_timestamp()
+
+    # --- Auto-detect and map IDs if not symbols ---
+    sample = dataset[hit_col].dropna().astype(str).tolist()
+    id_type = detect_id_type(sample)
+    if id_type != "symbol":
+        print(f"Converting {id_type} IDs to gene symbols...")
+        dataset = map_to_symbol(dataset, gene_col=hit_col)
+        hit_col = "symbol"  # mapped column
+
     data_sorted = dataset.sort_values(by=corr_col, ascending=False).reset_index(drop=True)
-    rnk_data = data_sorted[[hit_col, corr_col]]
+    rnk_data = data_sorted[[hit_col, corr_col]].dropna()
 
-    # Run prerank analysis
-    results = gp.prerank(
-        rnk=rnk_data,
-        gene_sets=gene_sets,
-        min_size=min_size,
-        max_size=max_size,
-        outdir=None,
-        verbose=True
-    )
-    results = pd.DataFrame(results.res2d)
-    results[['Data Base', 'Pathway']] = results['Term'].str.split('__', expand=True)
+    try:
+        results = gp.prerank(
+            rnk=rnk_data,
+            gene_sets=gene_sets,
+            min_size=min_size,
+            max_size=max_size,
+            outdir=None,
+            verbose=True
+        )
+    except Exception as e:
+        print(f"GSEA prerank failed: {e}")
+        return pd.DataFrame()
 
-    # Filter by threshold
-    pval_columns = [col for col in results.columns if "p-val" in col or "q-val" in col]
-    results = results[results[pval_columns].lt(threshold).any(axis=1)]
+    results_df = pd.DataFrame(results.res2d)
+    if results_df.empty:
+        print("GSEA returned no results.")
+        return results_df
 
-    save_with_timestamp(results, "gsea_results", timestamp)
+    results_df[['Data Base','Pathway']] = results_df['Term'].str.split('__', expand=True)
+    pval_columns = [col for col in results_df.columns if "p-val" in col or "q-val" in col]
+    results_df = results_df[results_df[pval_columns].lt(threshold).any(axis=1)]
 
-    print(f"Number of matching results with p-val < {threshold}: {len(results)}")
+    save_with_timestamp(results_df, "gsea_results", timestamp)
+    print(f"Number of matching results with p-val < {threshold}: {len(results_df)}")
 
-    # Take top high/low NES
-    sorted_results = results.sort_values(by="NES", ascending=True)
+    sorted_results = results_df.sort_values(by="NES", ascending=True)
     top_low_nes = sorted_results.head(10)
     top_high_nes = sorted_results.tail(10)
     top_combined = pd.concat([top_high_nes, top_low_nes]).drop_duplicates()
 
     plot_gsea_results(top_combined, timestamp)
-    return top_combined
+    return sorted_results
 
 
 def nrank_ora(
-        dataset,
-        gene_sets,
-        gene_col,
-        organism,
-        timestamp=get_timestamp()
-    ):
-    """Perform Enrichr enrichment analysis on a gene list."""
-    genes = dataset[gene_col].dropna().astype(str).tolist()
-    print(f"Using {len(genes)} genes")
+    dataset,
+    gene_sets,
+    gene_col,
+    organism="human",
+    timestamp=None
+):
+    """
+    Perform Enrichr enrichment analysis on a gene list.
+    Automatically maps Ensembl/Entrez/RefSeq/UniProt IDs to symbols.
+    """
+    if timestamp is None:
+        timestamp = get_timestamp()
 
-    enr = gp.enrichr(
-        gene_list=genes,
-        gene_sets=gene_sets,
-        organism=organism,
-        outdir=None,
-        verbose=True
-    )
+    # --- Auto-detect and map IDs ---
+    sample_ids = dataset[gene_col].dropna().astype(str).tolist()
+    id_type = detect_id_type(sample_ids)
+    if id_type != "symbol":
+        print(f"Converting {id_type} IDs to gene symbols...")
+        dataset = map_to_symbol(dataset, gene_col=gene_col, default_species=organism)
+        gene_col = "symbol"  # mapped column
+    else:
+        print("Detected input as gene symbols, no conversion needed.")
+
+    # --- Build gene list ---
+    genes = dataset[gene_col].dropna().astype(str).unique().tolist()
+    print(f"Using {len(genes)} unique genes for ORA")
+
+    if len(genes) == 0:
+        print("No valid genes to run ORA.")
+        return pd.DataFrame()
+
+    # --- Run Enrichr --
+    try:
+        enr = gp.enrichr(
+            gene_list=genes,
+            gene_sets=gene_sets,
+            organism=organism,
+            outdir=None,
+            verbose=True
+        )
+    except Exception as e:
+        print(f"ORA (Enrichr) failed: {e}")
+        return pd.DataFrame()
 
     results = pd.DataFrame(enr.results)
+    if results.empty:
+        print("Enrichr returned no results.")
+        return results
+
+    results = results[results["Adjusted P-value"] < 0.05]   # keep significant
+    results = results.sort_values(by="Combined Score", ascending=False)  # rank by strength
+
     save_with_timestamp(results, "ora_results", timestamp)
     print(f"Number of matching results: {len(results)}")
 
-    return results.head(20)
+    return results
+
