@@ -332,6 +332,7 @@ def create_server():
     mcp = FastMCP(
         name="discovera_fastmcp",
         instructions=server_instructions,
+        stateless_http=True
     )
 
     def _coalesce_none_defaults(model_obj: Any) -> Any:
@@ -1069,13 +1070,8 @@ def main():
     # Create the MCP server
     server = create_server()
 
-    # Configure and start the server
-    logger.info("Starting MCP server on 0.0.0.0:8000")
-    logger.info("Server will be accessible via SSE transport")
-
     try:
-        # Use FastMCP's built-in run method with SSE transport
-        server.run(transport="sse", host="0.0.0.0", port=8000)
+        server.run(transport="http", port=8000)
     except KeyboardInterrupt:
         logger.info("Server stopped by user")
     except Exception as e:
