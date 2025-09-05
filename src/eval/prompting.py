@@ -100,37 +100,6 @@ def get_llm(backend: str, model: str = None, **kwargs):
 
     else:
         raise ValueError(f"Unknown LLM backend: {backend}")
-#def prompt_multiple_questions_template(report_text: str, n: int) -> str:
-#    return f"""
-#    You are a biomedical researcher. Your task is to generate {n} multiple-choice questions based strictly on the report below.
-#    
-#    --- BEGIN REPORT ---
-#    {report_text}
-#    --- END REPORT ---
-#    
-#    Instructions:
-#    - The questions must be fully answerable using ONLY the content of the report above.
-#    - Do NOT use outside knowledge or make assumptions not supported directly or indirectly by the report.
-#    - Each question should test comprehension, interpretation, or inference strictly based on the report.
-#    - Ensure each question has four answer choices, clearly marked.
-#    - Provide the correct answer exactly as written in the choices.
-#    
-#    Output format:
-#    A JSON list of {n} objects, where each object contains:
-#    - "question": string,
-#    - "choices": list of 4 strings,
-#    - "correct": string (must exactly match one of the choices)
-#    
-#    Example output:
-#    [
-#      {{
-#        "question": "What pathway was most enriched in the analysis?",
-#        "choices": ["Pathway A", "Pathway B", "Pathway C", "Pathway D"],
-#        "correct": "Pathway A"
-#      }},
-#      ...
-#    ]
-#    """
 
 def multiple_questions_template(report_text: str, n: int) -> str:
     return f"""
@@ -185,73 +154,6 @@ def multiple_questions_template(report_text: str, n: int) -> str:
       ...
     ]
     """
-
-
-
-#def answer_prompt_template(
-#    question: str, choices: List[str], report: str
-#) -> str:
-#    """
-##    """
-#    if report:
-#
-#        prompt = f"""
-#        You are a biomedical domain expert. Use ONLY the information provided in the report below to answer the question.
-#        
-#        --- BEGIN REPORT ---
-#        {report}
-#        --- END REPORT ---
-#        
-#        Question:
-#        {question}
-#        
-#        Choices:
-#        {choices}
-#        
-#        Instructions:
-#        - Select the best choice ONLY if it is explicitly stated or can be directly inferred from the report.
-#        - Do NOT use any outside knowledge, assumptions, or speculation.
-#        - If the answer cannot be determined from the report, respond with:
-#          {{
-#            "answer": "insufficient_information",
-#            "confidence": 0.0
-#          }}
-#        
-#        Respond ONLY in this JSON format:
-#        {{
-#          "answer": "<chosen_option or 'insufficient_information'>",
-#          "confidence": <float between 0 and 1>
-#        }}
-#        """.strip()
-
-#    else:
-#
-#        prompt = f"""
-#        You are a biomedical domain expert.
-#        
-#        Question:
-#        {question}
-#        
-#        Choices:
-#        {choices}
-#        
-#        Instructions:
-#        - Answer the question based on your biomedical knowledge.
-#        - Provide the best choice and a confidence score between 0 and 1.
-#        - If you cannot confidently answer, respond with:
-#          {{
-#            "answer": "insufficient_information",
-#            "confidence": 0.0
-#          }}
-#        
-#        Respond ONLY in this JSON format:
-#        {{
-#          "answer": "<chosen_option or 'insufficient_information'>",
-#          "confidence": <float between 0 and 1>
-#        }}
-#        """.strip()
-#
-#    return prompt.strip()
 
 
 def answer_prompt_template(
@@ -313,96 +215,6 @@ def answer_prompt_template(
         """.strip()
 
     return prompt
-
-
-#def generate_questions(
-#    reports: List[tuple],
-#    prompt_template: Callable[[str, int], str],
-#    provider: str = "openai",
-#    model: str = "gpt-4o-mini",
-#    num_questions: int = 20,
-#    output_path: Optional[str] = None,
-#    source: Optional[str] = None
-#) -> List[Dict]:
-#    """
-#    Generate multiple choice questions (MCQs) from a list of reports using a prompt template and a specified LLM backend.
-#
-#    The function iterates over each report, generates a prompt for question creation, invokes the language model
-#    to generate questions, collects the results, and optionally saves them to a JSON file.
-#
-#    Args:
-#        reports (List[tuple]): List of tuples representing reports. Each tuple should have the report ID/key as
-#            the first element, and the report text either as the second or third element.
-#        prompt_template (Callable[[str, int], str]): Function that takes report text and number of questions
-#            and returns a prompt string for the LLM.
-#        provider (str, optional): LLM backend provider name (e.g., "openai"). Defaults to "openai".
-#        model (str, optional): Model name to use with the LLM backend. Defaults to "gpt-4o-mini".
-#        num_questions (int, optional): Number of MCQs to generate per report. Defaults to 20.
-#        output_path (Optional[str], optional): Directory path to save the generated questions JSON file.
-#            If None, no file is saved. Defaults to None.
-#        source (Optional[str], optional): Optional string to add as metadata to each question dictionary
-#            to track the source of the questions. Defaults to None.
-#
-#    Returns:
-#        List[Dict]: A list of dictionaries, each representing a multiple choice question with keys:
-#            - 'report_id': The ID/key of the source report
-#            - 'question': The question text
-#            - 'choices': List of answer choices
-#            - 'correct': The correct answer
-#            - 'source': The provided source string or None
-#
-#    Raises:
-#        Exception: Any exceptions during question generation for a report will be caught and logged,
-#                   causing the function to continue processing remaining reports.
-#    """
-#    llm = get_llm(provider, model, api_key=load_openai_key())
-#    start_time = time.time()
-#
-#    print(f"[INFO] Starting question generation for {len(reports)} reports...\n")
-#    multiple_choice_questions = []
-#
-#    for idx, report in enumerate(tqdm(reports, desc="Processing Reports"), 1):
-#        try:
-#            # Expecting each report tuple to contain at least report_id and report_text (in 2nd or 3rd element)
-#            report_key = report[0]
-#            report_text = report[2] if len(report) > 2 else report[1]
-#
-#            prompt = prompt_template(report_text, num_questions)
-#            mcqs = llm.run(prompt, json_output=True)
-#
-#            if isinstance(mcqs, list):
-#                for q in mcqs:
-#                    multiple_choice_questions.append({
-#                        "report_id": report_key,
-#                        "question": q.get("question", ""),
-#                        "choices": q.get("choices", []),
-#                        "correct": q.get("correct", ""),
-#                        "source": source
-#                    })
-#            else:
-#                print(f"[WARNING] Unexpected output format for report {report_key}")
-#
-#        except Exception as e:
-#            print(f"[ERROR] Failed to process report {report_key}: {e}")
-#            continue
-#
-#    total_time = time.time() - start_time
-#    print(f"\n[INFO] Question generation completed in {total_time:.2f} seconds.")
-#    print(f"[INFO] Total questions generated: {len(multiple_choice_questions)}")
-#
-#    if output_path:
-#        # Ensure output_path is a directory
-#        os.makedirs(output_path, exist_ok=True)
-#        filename = f"qs{num_questions}_{source}_{provider}_{model.replace('/', '-')}.json"
-#        file_path = os.path.join(output_path, filename)
-#        try:
-#            with open(file_path, 'w', encoding='utf-8') as f:
-#                json.dump(multiple_choice_questions, f, indent=2, ensure_ascii=False)
-#            print(f"[INFO] Output saved to {file_path}")
-#        except Exception as e:
-#            print(f"[ERROR] Failed to save output to {file_path}: {e}")
-
-#    return multiple_choice_questions
 
 
 def generate_questions(
