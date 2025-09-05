@@ -1,11 +1,16 @@
 import os
 import json
+import asyncio
+import threading
+import queue
 from typing import List, Dict, Any
 
 import streamlit as st
 import httpx
 from dotenv import load_dotenv
-from openai import OpenAI
+from langgraph.prebuilt import create_react_agent
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_core.messages import AIMessage, ToolMessage
 
 # Load .env if present
 load_dotenv()
@@ -22,8 +27,6 @@ MCP_TIMEOUT_MS = int(os.getenv("MCP_TIMEOUT_MS", "3500"))
 if not OPENAI_API_KEY:
     st.error("OPENAI_API_KEY missing in environment")
     st.stop()
-
-client = OpenAI(api_key=OPENAI_API_KEY)
 
 st.set_page_config(page_title="Discovera Chat", page_icon="🧬", layout="centered")
 
@@ -225,67 +228,145 @@ def as_msg(role: str, text: str) -> Dict[str, Any]:
     return {"role": role, "content": [{"type": part_type, "text": text}]}
 
 
-def stream_responses(history: List[Dict[str, Any]]):
-    tools = [
+def _ensure_trailing_slash(url: str) -> str:
+    return url if url.endswith("/") else url + "/"
+
+
+def _load_mcp_tools(server_url: str):
+    client = MultiServerMCPClient(
         {
-            "type": "mcp",
-            "server_label": "discovera_fastmcp",
-            "server_url": st.session_state.get("mcp_server") or MCP_ADDRESS,
-            "require_approval": "never",
+            "discovera": {
+                "transport": "sse",
+                "url": _ensure_trailing_slash(server_url),
+            }
         }
-    ]
-    ctx = (st.session_state.get("context") or "").strip()
-    instr = f"{server_instructions}\n\nContext:\n{ctx}" if ctx else server_instructions
-    stream = client.responses.create(
-        model=OPENAI_MODEL,
-        instructions=instr,
-        input=history,
-        tools=tools,
-        stream=True,
     )
-    for event in stream:
-        et = getattr(event, "type", None)
-        if et == "response.output_text.delta":
-            yield ("delta", getattr(event, "delta", "") or "")
-        elif et == "response.output_text.done":
-            yield ("done", None)
-        elif et == "response.error":
-            yield ("error", getattr(event, "error", ""))
-        # Surface any tool-related events for visibility
-        elif et and "tool" in et:
-            # Best-effort serialize
+    return asyncio.run(client.get_tools())
+
+
+def _messages_from_transcript(transcript: List[Dict[str, Any]]):
+    msgs = []
+    for m in transcript:
+        role = m.get("role")
+        content = m.get("content", "")
+        if role in ("user", "assistant") and isinstance(content, str):
+            msgs.append({"role": role, "content": content})
+    return msgs
+
+
+def stream_langgraph(transcript: List[Dict[str, Any]]):
+    server_url = st.session_state.get("mcp_server") or MCP_ADDRESS
+    ctx = (st.session_state.get("context") or "").strip()
+    prompt = f"{server_instructions}\n\nContext:\n{ctx}" if ctx else server_instructions
+
+    # Build tools and agent
+    try:
+        tools = _load_mcp_tools(server_url)
+    except Exception as e:
+        yield ("error", f"[MCP tools error] {e}")
+        return
+
+    try:
+        model_id = f"openai:{OPENAI_MODEL}"
+        agent = create_react_agent(model_id, tools=tools, prompt=prompt, version="v2")
+    except Exception as e:
+        yield ("error", f"[Agent init error] {e}")
+        return
+
+    inputs = {"messages": _messages_from_transcript(transcript)}
+
+    # Stream updates from the graph (agent thoughts + tool calls/results)
+    def _stream_agent_updates():
+        q: "queue.Queue[Any]" = queue.Queue()
+
+        async def _produce():
             try:
-                payload = event.__dict__
-            except Exception:
-                try:
-                    payload = {"repr": str(event)}
-                except Exception:
-                    payload = {"type": et}
-            text = f"Tool event: {et}\n```json\n{json.dumps(payload, default=str)[:2000]}\n```"
-            yield ("tool", text)
+                async for update in agent.astream(inputs, stream_mode="updates"):
+                    q.put(update)
+            except Exception as exc:  # surface errors back to main thread
+                q.put(("__error__", exc))
+            finally:
+                q.put(("__done__", None))
+
+        def _runner():
+            asyncio.run(_produce())
+
+        t = threading.Thread(target=_runner, daemon=True)
+        t.start()
+
+        while True:
+            item = q.get()
+            if isinstance(item, tuple) and item[0] == "__error__":
+                raise item[1]
+            if isinstance(item, tuple) and item[0] == "__done__":
+                break
+            yield item
+
+    try:
+        for update in _stream_agent_updates():
+            if not isinstance(update, dict):
+                continue
+            for node_name, node_update in update.items():
+                messages_update = node_update.get("messages") if isinstance(node_update, dict) else None
+                if not messages_update:
+                    continue
+                for msg in messages_update:
+                    # Agent messages ("thoughts"/content)
+                    if isinstance(msg, AIMessage):
+                        content_text = msg.content if isinstance(msg.content, str) else str(msg.content)
+                        if content_text:
+                            yield ("delta", content_text)
+                        # Surface tool call intents
+                        tool_calls = getattr(msg, "tool_calls", None) or []
+                        if tool_calls:
+                            calls_render = []
+                            for call in tool_calls:
+                                name = call.get("name")
+                                args = call.get("args")
+                                calls_render.append({"name": name, "args": args})
+                            tool_calls_json = json.dumps(
+                                calls_render, default=str, indent=2
+                            )
+                            preview_json = (
+                                tool_calls_json if len(tool_calls_json) <= 2000 else tool_calls_json[:2000] + "…"
+                            )
+                            yield (
+                                "tool",
+                                "Tool calls:\n```json\n" + preview_json + "\n```",
+                            )
+                    # Tool results
+                    elif isinstance(msg, ToolMessage):
+                        tool_name = getattr(msg, "name", "tool") or "tool"
+                        tool_text = msg.content if isinstance(msg.content, str) else str(msg.content)
+                        preview = tool_text if len(tool_text) <= 1000 else (tool_text[:1000] + "…")
+                        yield (
+                            "tool",
+                            f"{tool_name} result:\n```\n{preview}\n```",
+                        )
+        # Signal completion
+        yield ("done", None)
+    except Exception as e:
+        yield ("error", f"[Run error] {e}")
 
 
 if prompt:
-    # 1) append user to UI transcript and Responses history
+    # 1) append user to UI transcript and show it
     st.session_state["messages"].append({"role": "user", "content": prompt})
-    st.session_state["history"].append(as_msg("user", prompt))
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # 2) call Responses with streaming
+    # 2) stream from LangGraph agent
     with st.chat_message("assistant"):
         placeholder = st.empty()
         assistant_accum = ""
-        for kind, payload in stream_responses(st.session_state["history"]):
+        for kind, payload in stream_langgraph(st.session_state["messages"]):
             if kind == "delta" and payload:
                 assistant_accum += payload
                 placeholder.markdown(assistant_accum)
-            elif kind == "error":
-                placeholder.markdown(f"[OpenAI error] {payload}")
+            elif kind == "error" and payload:
+                st.markdown(str(payload))
             elif kind == "tool" and payload:
-                # Render tool events inline as small markdown blocks
-                st.markdown(payload)
+                st.markdown(str(payload))
 
     # 3) store assistant turn
     st.session_state["messages"].append({"role": "assistant", "content": assistant_accum})
-    st.session_state["history"].append(as_msg("assistant", assistant_accum))

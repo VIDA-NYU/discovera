@@ -87,6 +87,7 @@ A list of gene names to query in Indra.
 """
     )
     size: int = Field(
+        default=2,
         description="""
 The size of the gene combinations. Defaults to 2.
 """
@@ -210,6 +211,22 @@ class GeneInfoInput(BaseModel):
     gene_list: List[str] = Field(
         description="""
 A list of gene symbols for annotation lookup.
+"""
+    )
+
+
+class CountEdgesInput(BaseModel):
+    edges: List[Dict[str, Any]] = Field(
+        description="""
+List of edge records (rows) to group and count.
+Each item should include columns matching the chosen grouping.
+"""
+    )
+    grouping: Optional[str] = Field(
+        default="detailed",
+        description="""
+Grouping mode. One of: "summary" | "detailed" | "view".
+Defaults to "detailed".
 """
     )
 

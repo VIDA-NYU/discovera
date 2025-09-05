@@ -1,4 +1,8 @@
-streamlit==1.37.1
-openai==1.43.0
+streamlit==1.49.1
+openai==1.106.1
 httpx==0.27.2
 python-dotenv==1.0.1
+langchain==0.3.27
+langgraph==0.6.6
+langgraph-prebuilt==0.0.7
+langchain_mcp_adapters==0.1.9

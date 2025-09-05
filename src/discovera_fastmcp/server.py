@@ -16,7 +16,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from itertools import combinations
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import gseapy as gp
 import pandas as pd
@@ -42,6 +42,7 @@ from src.discovera_fastmcp.pydantic import (
     StorageGetInput,
     CsvRecordInput,
     CsvReadInput,
+    CountEdgesInput,
 )
 from src.discovera.bkd.gsea import plot_gsea_results
 from src.discovera.bkd.query_indra import nodes_batch, normalize_nodes
@@ -358,7 +359,9 @@ def create_server():
             return _coalesce_none_defaults(params)
         if isinstance(params, dict):
             try:
-                model_obj = model_cls(**params)
+                # Drop None values so model defaults are applied
+                sanitized = {k: v for k, v in params.items() if v is not None}
+                model_obj = model_cls(**sanitized)
                 return _coalesce_none_defaults(model_obj)
             except ValidationError as e:
                 # Keep message concise but actionable
@@ -384,7 +387,10 @@ def create_server():
         }
 
     @mcp.tool()
-    async def query_genes(params: QueryGenesInput) -> Dict[str, Any]:
+    async def query_genes(
+        genes: List[str],
+        size: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """
         Queries the Indra database for relationships between the listed genes.
 
@@ -394,7 +400,9 @@ def create_server():
                   'text_refs.DOI', 'text_refs.PMCID', 'text_refs.SOURCE', 'text_refs.READER', 'url'
         """
         # Validate/construct params
-        params = _validate_params(params, QueryGenesInput, "query_genes")
+        params = _validate_params(
+            {"genes": genes, "size": size}, QueryGenesInput, "query_genes"
+        )
 
         nodes = params.genes
         results = []
@@ -477,7 +485,7 @@ def create_server():
     @mcp.tool()
     async def count_edges(
         edges: List[Dict[str, Any]],
-        grouping: str,
+        grouping: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Counts and groups interactions found in the dataset based on the specified grouping type.
@@ -494,6 +502,11 @@ def create_server():
         Raises:
             ValueError: If an invalid group_type is provided.
         """
+        # Validate/construct params
+        params = _validate_params(
+            {"edges": edges, "grouping": grouping}, CountEdgesInput, "count_edges"
+        )
+
         # Define grouping options
         group_options = {
             "summary": ["nodes"],
@@ -502,16 +515,16 @@ def create_server():
         }
 
         # Convert JSON-like input to DataFrame
-        edges = edges or []
-        edges_df = pd.DataFrame(edges)
+        edges_list = params.edges or []
+        edges_df = pd.DataFrame(edges_list)
 
         # Validate group_type
-        if grouping not in group_options:
+        if params.grouping not in group_options:
             raise ValueError(
-                f"Invalid group_type '{grouping}'. Choose from {list(group_options.keys())}."
+                f"Invalid group_type '{params.grouping}'. Choose from {list(group_options.keys())}."
             )
 
-        group_columns = group_options[grouping]
+        group_columns = group_options[params.grouping]
 
         # Check if the provided group columns exist in the DataFrame
         if not set(group_columns).issubset(edges_df.columns):
@@ -526,7 +539,13 @@ def create_server():
 
     @mcp.tool()
     async def gsea_pipe(
-        params: GseaPipeInput,
+        csv_id: str,
+        gene_sets: Optional[List[str]] = None,
+        hit_col: Optional[str] = None,
+        corr_col: Optional[str] = None,
+        min_size: Optional[int] = None,
+        max_size: Optional[int] = None,
+        threshold: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Performs Gene Set Enrichment Analysis (GSEA), a computational method
@@ -570,7 +589,19 @@ def create_server():
         """
 
         # Validate/construct params
-        params = _validate_params(params, GseaPipeInput, "gsea_pipe")
+        params = _validate_params(
+            {
+                "csv_id": csv_id,
+                "gene_sets": gene_sets,
+                "hit_col": hit_col,
+                "corr_col": corr_col,
+                "min_size": min_size,
+                "max_size": max_size,
+                "threshold": threshold,
+            },
+            GseaPipeInput,
+            "gsea_pipe",
+        )
 
         # Convert Pydantic models to DataFrame or load from CSV
         try:
@@ -660,7 +691,11 @@ def create_server():
             return _exception_payload("gsea_pipe", e, context)
 
     @mcp.tool()
-    async def ora_pipe(params: OraPipeInput) -> Dict[str, Any]:
+    async def ora_pipe(
+        csv_id: str,
+        gene_col: Optional[str] = None,
+        gene_sets: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         """
         Performs Over Representation Analysis (ORA), a computational method
         used to determine whether a set of genes related to a biological function or pathway
@@ -680,7 +715,11 @@ def create_server():
                 - Genes: The genes in the gene set.
         """
         # Validate/construct params
-        params = _validate_params(params, OraPipeInput, "ora_pipe")
+        params = _validate_params(
+            {"csv_id": csv_id, "gene_col": gene_col, "gene_sets": gene_sets},
+            OraPipeInput,
+            "ora_pipe",
+        )
 
         # Drop NA values in the gene column
         try:
@@ -729,12 +768,20 @@ def create_server():
             return _exception_payload("ora_pipe", e, context)
 
     @mcp.tool()
-    async def enrich_rumma(params: EnrichRummaInput) -> Dict[str, Any]:
+    async def enrich_rumma(
+        genes: List[str],
+        first: Optional[int] = None,
+        max_records: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """
         Performs enrichment using the Rummagene GraphQL API for a list of genes.
         """
         # Validate/construct params
-        params = _validate_params(params, EnrichRummaInput, "enrich_rumma")
+        params = _validate_params(
+            {"genes": genes, "first": first, "max_records": max_records},
+            EnrichRummaInput,
+            "enrich_rumma",
+        )
 
         df = enrich_query(
             params.genes, first=params.first, max_records=params.max_records
@@ -743,12 +790,19 @@ def create_server():
         return df.to_dict()
 
     @mcp.tool()
-    async def query_string_rumma(params: QueryStringRummaInput) -> Dict[str, Any]:
+    async def query_string_rumma(
+        term: str,
+        retmax: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """
         Searches PubMed and maps articles to gene sets in Rummagene.
         """
         # Validate/construct params
-        params = _validate_params(params, QueryStringRummaInput, "query_string_rumma")
+        params = _validate_params(
+            {"term": term, "retmax": retmax},
+            QueryStringRummaInput,
+            "query_string_rumma",
+        )
 
         pmc_ids = rumm_search_pubmed(params.term, retmax=params.retmax)
         pmcs_with_prefix = ["PMC" + pmc for pmc in pmc_ids]
@@ -766,12 +820,12 @@ def create_server():
         return merged.to_dict()
 
     @mcp.tool()
-    async def query_table_rumma(params: QueryTableRummaInput) -> Dict[str, Any]:
+    async def query_table_rumma(term: str) -> Dict[str, Any]:
         """
         Searches gene set tables in Rummagene by a term and extracts PMCIDs.
         """
         # Validate/construct params
-        params = _validate_params(params, QueryTableRummaInput, "query_table_rumma")
+        params = _validate_params({"term": term}, QueryTableRummaInput, "query_table_rumma")
 
         df = table_search_query(params.term)
         if df.empty or "term" not in df.columns:
@@ -782,24 +836,32 @@ def create_server():
         return df.to_dict()
 
     @mcp.tool()
-    async def sets_info_rumm(params: SetsInfoRummInput) -> Dict[str, Any]:
+    async def sets_info_rumm(gene_set_id: str) -> Dict[str, Any]:
         """
         Retrieves detailed gene membership and annotations for a gene set.
         """
         # Validate/construct params
-        params = _validate_params(params, SetsInfoRummInput, "sets_info_rumm")
+        params = _validate_params({"gene_set_id": gene_set_id}, SetsInfoRummInput, "sets_info_rumm")
 
         df = genes_query(params.gene_set_id)
         logger.info("🛠️[sets_info_rumm] Sets info fetched successfully")
         return df.to_dict()
 
     @mcp.tool()
-    async def literature_trends(params: LiteratureTrendsInput) -> Dict[str, Any]:
+    async def literature_trends(
+        term: str,
+        email: str,
+        batch_size: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """
         Plots a publication timeline and returns year-to-IDs map and image path.
         """
         # Validate/construct params
-        params = _validate_params(params, LiteratureTrendsInput, "literature_trends")
+        params = _validate_params(
+            {"term": term, "email": email, "batch_size": batch_size},
+            LiteratureTrendsInput,
+            "literature_trends",
+        )
 
         year_to_ids, save_path = literature_timeline(
             term=params.term,
@@ -822,12 +884,20 @@ def create_server():
         return {"year_to_ids": year_to_ids or {}, "image_path": save_path}
 
     @mcp.tool()
-    async def prioritize_genes(params: PrioritizeGenesInput) -> Dict[str, Any]:
+    async def prioritize_genes(
+        gene_list: List[str],
+        context_term: str,
+        email: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Prioritizes genes in the context of a disease or phenotype.
         """
         # Validate/construct params
-        params = _validate_params(params, PrioritizeGenesInput, "prioritize_genes")
+        params = _validate_params(
+            {"gene_list": gene_list, "context_term": context_term, "email": email},
+            PrioritizeGenesInput,
+            "prioritize_genes",
+        )
 
         email = params.email or "test@example.com"
         df = prioritize_genes_fn(params.gene_list, params.context_term, email=email)
@@ -835,12 +905,12 @@ def create_server():
         return df.to_dict()
 
     @mcp.tool()
-    async def gene_info(params: GeneInfoInput) -> Dict[str, Any]:
+    async def gene_info(gene_list: List[str]) -> Dict[str, Any]:
         """
         Fetches gene annotations from MyGene.info for a list of gene symbols.
         """
         # Validate/construct params
-        params = _validate_params(params, GeneInfoInput, "gene_info")
+        params = _validate_params({"gene_list": gene_list}, GeneInfoInput, "gene_info")
 
         parsed = [g.strip() for g in params.gene_list if g.strip()]
         df = fetch_gene_annota(parsed)
@@ -853,11 +923,38 @@ def create_server():
     # =========================
 
     @mcp.tool()
-    async def storage_list(params: StorageListInput) -> Dict[str, Any]:
+    async def storage_list(
+        origin_tool: Optional[str] = None,
+        tag: Optional[str] = None,
+        ext: Optional[str] = None,
+        category: Optional[str] = None,
+        name_contains: Optional[str] = None,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+        with_content: Optional[bool] = None,
+        max_bytes: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """
         List stored files with optional filters; optionally include content preview.
         """
         try:
+            # Validate/construct params
+            params = _validate_params(
+                {
+                    "origin_tool": origin_tool,
+                    "tag": tag,
+                    "ext": ext,
+                    "category": category,
+                    "name_contains": name_contains,
+                    "since": since,
+                    "until": until,
+                    "with_content": with_content,
+                    "max_bytes": max_bytes,
+                },
+                StorageListInput,
+                "storage_list",
+            )
+
             entries = _load_storage_index()
             filtered = _filter_entries(
                 entries,
@@ -886,11 +983,22 @@ def create_server():
             return _exception_payload("storage_list", e, {})
 
     @mcp.tool()
-    async def storage_get(params: StorageGetInput) -> Dict[str, Any]:
+    async def storage_get(
+        id: str,
+        with_content: Optional[bool] = None,
+        max_bytes: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """
         Retrieve a stored file entry by id or path; optionally include content.
         """
         try:
+            # Validate/construct params
+            params = _validate_params(
+                {"id": id, "with_content": with_content, "max_bytes": max_bytes},
+                StorageGetInput,
+                "storage_get",
+            )
+
             entries = _load_storage_index()
             entry = None
             if params.id:
@@ -916,11 +1024,34 @@ def create_server():
             return _exception_payload("storage_get", e, {"id": params.id})
 
     @mcp.tool()
-    async def csv_record(params: CsvRecordInput) -> Dict[str, Any]:
+    async def csv_record(
+        name: Optional[str] = None,
+        csv_text: Optional[str] = None,
+        csv_base64: Optional[str] = None,
+        csv_path: Optional[str] = None,
+        csv_url: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """
         Record a user-provided CSV into output/user_csvs and register it.
         """
         try:
+            # Validate/construct params
+            params = _validate_params(
+                {
+                    "name": name,
+                    "csv_text": csv_text,
+                    "csv_base64": csv_base64,
+                    "csv_path": csv_path,
+                    "csv_url": csv_url,
+                    "tags": tags,
+                    "metadata": metadata,
+                },
+                CsvRecordInput,
+                "csv_record",
+            )
+
             # Determine exactly one source of CSV content
             provided_sources = {
                 "csv_text": params.csv_text,
@@ -1017,11 +1148,19 @@ def create_server():
             return _exception_payload("csv_record", e, {"name": params.name})
 
     @mcp.tool()
-    async def csv_read(params: CsvReadInput) -> Dict[str, Any]:
+    async def csv_read(
+        id: str,
+        n_rows: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """
         Read a stored CSV by id or path and return a preview of rows.
         """
         try:
+            # Validate/construct params
+            params = _validate_params(
+                {"id": id, "n_rows": n_rows}, CsvReadInput, "csv_read"
+            )
+
             target_path = None
             if params.id:
                 entries = _load_storage_index()
@@ -1071,7 +1210,7 @@ def main():
     server = create_server()
 
     try:
-        server.run(transport="http", port=8000)
+        server.run(transport="sse", port=8000)
     except KeyboardInterrupt:
         logger.info("Server stopped by user")
     except Exception as e:
