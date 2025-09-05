@@ -4,10 +4,15 @@ import asyncio
 import threading
 import queue
 from typing import List, Dict, Any
+from datetime import datetime
+import hashlib
 
 import streamlit as st
 import httpx
 from dotenv import load_dotenv
+from botocore.config import Config
+from botocore.exceptions import BotoCoreError, NoCredentialsError, ClientError
+import boto3
 from langgraph.prebuilt import create_react_agent
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_core.messages import AIMessage, ToolMessage, SystemMessage, HumanMessage
@@ -20,8 +25,12 @@ load_dotenv()
 # --- Config ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-MCP_ADDRESS = os.getenv("MCP_SERVER_ADDRESS") or "http://127.0.0.1:8000/mcp"
+MCP_ADDRESS = os.getenv("MCP_SERVER_ADDRESS") or "http://127.0.0.1:8000/sse"
 MCP_TIMEOUT_MS = int(os.getenv("MCP_TIMEOUT_MS", "3500"))
+S3_BUCKET = os.getenv("UPLOADS_S3_BUCKET")
+S3_PREFIX = os.getenv("UPLOADS_S3_PREFIX", "uploads")
+S3_REGION = os.getenv("AWS_REGION", "us-east-2")
+S3_PRESIGN_TTL = int(os.getenv("S3_PRESIGN_TTL_SECONDS", "604800"))  # 7 days
 LANGGRAPH_CONFIG = RunnableConfig(
     {"configurable": {"thread_id": "discovera_streamlit"}}
 )
@@ -50,63 +59,29 @@ with st.expander("Connection", expanded=True):
             ok = False
             notes: List[str] = []
             try:
-                with httpx.Client(timeout=MCP_TIMEOUT_MS / 1000.0) as http:
-                    # 1) Try HEAD and GET on the configured URL
-                    for method in ("HEAD", "GET"):
-                        try:
-                            r = http.request(method, str(url))
+                with httpx.Client(
+                    timeout=MCP_TIMEOUT_MS / 1000.0, follow_redirects=True
+                ) as http:
+                    # 0) Open SSE request in streaming mode and close immediately after status
+                    try:
+                        sse_headers = {
+                            "Accept": "text/event-stream",
+                            "Cache-Control": "no-store",
+                            "Connection": "keep-alive",
+                        }
+                        with http.stream("GET", str(url), headers=sse_headers) as r:
                             notes.append(
-                                f"{method} {url.raw_path.decode() or '/'} -> {r.status_code}"
+                                f"STREAM GET {url.raw_path.decode()} -> {r.status_code}"
                             )
-                            if r.status_code in (200, 202, 400, 404, 405):
+                            if r.status_code == 200:
                                 ok = True
-                                break
-                        except Exception as e:
-                            notes.append(
-                                f"{method} {url.raw_path.decode() or '/'} -> {e}"
-                            )
-
-                    # 2) If still not ok and URL has a path, probe server root
-                    if not ok and (url.path or b""):
-                        root_url = url.copy_with(path="/")
-                        for method in ("HEAD", "GET"):
-                            try:
-                                r = http.request(method, str(root_url))
-                                notes.append(
-                                    f"{method} {root_url.raw_path.decode()} -> {r.status_code}"
-                                )
-                                if r.status_code in (200, 202, 400, 404, 405):
-                                    ok = True
-                                    break
-                            except Exception as e:
-                                notes.append(
-                                    f"{method} {root_url.raw_path.decode()} -> {e}"
-                                )
-
-                    # 3) If still not ok, attempt minimal MCP JSON-RPC list tools on configured URL
-                    if not ok:
-                        try:
-                            payload = {
-                                "jsonrpc": "2.0",
-                                "id": "1",
-                                "method": "tools/list",
-                            }
-                            r = http.post(
-                                str(url),
-                                json=payload,
-                                headers={"Content-Type": "application/json"},
-                            )
-                            notes.append(
-                                f"POST {url.raw_path.decode()} list -> {r.status_code}"
-                            )
-                            ok = r.status_code in (200, 202)
-                        except Exception as e:
-                            notes.append(f"POST {url.raw_path.decode()} list -> {e}")
+                    except Exception as e:
+                        notes.append(f"STREAM GET {url.raw_path.decode()} -> {e}")
 
                 st.session_state["mcp_connected"] = ok
                 status_msg = "ok" if ok else "failed"
                 # Show first few notes to avoid long toasts
-                detail = " | ".join(notes[:3])
+                detail = " | ".join(notes)
                 st.toast(f"MCP check {status_msg}. {detail}")
             except Exception as e:
                 st.session_state["mcp_connected"] = False
@@ -228,6 +203,149 @@ with st.expander("Context", expanded=False):
         ),
     )
 
+    # File uploads for CSV/TXT to include as context
+    uploaded_files = st.file_uploader(
+        "Upload CSV/TXT files to include in context",
+        type=["csv", "txt"],
+        accept_multiple_files=True,
+        key="context_upload_files",
+        help="Files are uploaded to S3 and summarized into the context.",
+    )
+
+    # Initialize session state trackers
+    if "context_uploads" not in st.session_state:
+        st.session_state["context_uploads"] = (
+            []
+        )  # list of {hash, name, type, preview, url}
+    if "context_upload_hashes" not in st.session_state:
+        st.session_state["context_upload_hashes"] = set()
+
+    _s3_client = None
+
+    def _get_s3():
+        global _s3_client
+        if _s3_client is not None:
+            return _s3_client
+        if not S3_BUCKET:
+            return None
+        try:
+            _s3_client_local = boto3.client(
+                "s3",
+                region_name=S3_REGION,
+                aws_access_key_id=os.getenv("AWS_ACCESS_KEY"),
+                aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+                config=Config(
+                    signature_version="s3v4",
+                    s3={
+                        "addressing_style": "virtual",
+                    },
+                ),
+            )
+            # Light touch to validate creds lazily; skip actual call to avoid latency
+            _s3_client = _s3_client_local
+            return _s3_client
+        except Exception:
+            return None
+
+    # Local filesystem helpers removed; uploads go directly to S3
+
+    def _save_uploaded_file(file_obj) -> Dict[str, Any] | None:
+        try:
+            raw: bytes = file_obj.getvalue()
+        except Exception:
+            return None
+        if not raw:
+            return None
+        sha = hashlib.sha256(raw).hexdigest()
+        if sha in st.session_state["context_upload_hashes"]:
+            return None  # already processed in this session
+
+        ext = os.path.splitext(file_obj.name)[1].lower() or ".bin"
+        # note: timestamp not needed without local writes
+        safe_name = os.path.splitext(os.path.basename(file_obj.name))[0]
+        safe_name = (
+            "".join(ch for ch in safe_name if ch.isalnum() or ch in ("_", "-"))
+            or "upload"
+        )
+        # No local write; upload directly to S3
+
+        # Build a short preview
+        preview = ""
+        try:
+            # Try utf-8 first, fallback to latin-1
+            text = raw.decode("utf-8", errors="ignore")
+            if not text:
+                text = raw.decode("latin-1", errors="ignore")
+            if ext == ".txt":
+                preview = text[:500]
+            elif ext == ".csv":
+                # show first 3 non-empty lines
+                lines = [ln for ln in text.splitlines() if ln.strip()][:3]
+                preview = "\n".join(lines)
+            else:
+                preview = text[:200]
+        except Exception:
+            preview = ""
+
+        # Attempt S3 upload with presigned URL generation
+        remote_url: str | None = None
+        try:
+            s3 = _get_s3()
+            if s3 and S3_BUCKET:
+                # Choose content type
+                if ext == ".csv":
+                    content_type = "text/csv"
+                elif ext == ".txt":
+                    content_type = "text/plain"
+                else:
+                    content_type = "application/octet-stream"
+
+                s3_key = f"{S3_PREFIX}/{datetime.now().strftime('%Y-%m-%d')}/{sha[:12]}_{safe_name}{ext}"
+                put_kwargs = {
+                    "Bucket": S3_BUCKET,
+                    "Key": s3_key,
+                    "Body": raw,
+                    "ContentType": content_type,
+                }
+                s3.put_object(**put_kwargs)
+                remote_url = s3.generate_presigned_url(
+                    "get_object",
+                    Params={
+                        "Bucket": S3_BUCKET,
+                        "Key": s3_key,
+                        "ResponseContentDisposition": "inline",
+                    },
+                    ExpiresIn=S3_PRESIGN_TTL,
+                )
+        except (BotoCoreError, NoCredentialsError, ClientError, Exception):
+            remote_url = None
+
+        if not remote_url:
+            return None
+
+        rec = {
+            "hash": sha,
+            "name": file_obj.name,
+            "type": (ext[1:] if ext.startswith(".") else ext).lower(),
+            "preview": preview,
+            "url": remote_url,
+        }
+        st.session_state["context_upload_hashes"].add(sha)
+        st.session_state["context_uploads"].append(rec)
+        return rec
+
+    # Process uploads and append to context (deduplicated by content hash)
+    new_records: List[Dict[str, Any]] = []
+    if uploaded_files:
+        for uf in uploaded_files:
+            rec = _save_uploaded_file(uf)
+            if rec:
+                new_records.append(rec)
+        if new_records:
+            st.write("Uploaded files:")
+            for rec in new_records:
+                st.markdown(f"- `{rec['name']}` → [download link]({rec['url']})")
+
 st.divider()
 
 # --- Chat state ---
@@ -237,12 +355,18 @@ if "checkpointer" not in st.session_state:
     print("Creating checkpointer...")
     st.session_state["checkpointer"] = InMemorySaver()
 
-# Show transcript
+# Show transcript (supports foldable tool entries)
 for m in st.session_state["messages"]:
     role = m.get("role", "assistant")
     content = m.get("content", "")
+    is_foldable = m.get("foldable", False)
+    title = m.get("title") or "Details"
     with st.chat_message(role):
-        st.markdown(content)
+        if is_foldable:
+            with st.expander(title, expanded=False):
+                st.markdown(content)
+        else:
+            st.markdown(content)
 
 # Compose
 prompt = st.chat_input("Ask anything…")
@@ -274,15 +398,33 @@ def _system_message() -> SystemMessage:
     return SystemMessage(content=server_instructions)
 
 
+def _context() -> str:
+    ctx = st.session_state.get("context") or ""
+    uploads = st.session_state.get("context_uploads") or []
+    if uploads:
+        ctx += "Uploaded files (stored in S3):\n"
+        for rec in uploads:
+            ctx += f"""
+Name: {rec['name']}
+  Preview:
+    {rec['preview']}
+  Download URL: {rec['url']}
+  Type: {rec['type']}
+"""
+    return ctx
+
+
 def _human_message(prompt: str) -> HumanMessage:
-    ctx = (st.session_state.get("context") or "").strip()
+    ctx = _context()
+
+    print(f"Context: {ctx}")
 
     return HumanMessage(
         content=f"""
-    Context:
+    **Context:**
     {ctx}
 
-    User Prompt:
+    **User Prompt:**
     {prompt}
     """
     )
@@ -414,19 +556,34 @@ if prompt:
         st.markdown(prompt)
 
     # 2) stream from LangGraph agent
-    with st.chat_message("assistant"):
-        placeholder = st.empty()
-        assistant_accum = ""
-        for kind, payload in stream_langgraph(prompt):
-            if kind == "delta" and payload:
-                assistant_accum += payload
-                placeholder.markdown(assistant_accum)
-            elif kind == "error" and payload:
+    # 2) stream from LangGraph agent, rendering events in time order (no placeholder)
+    for kind, payload in stream_langgraph(prompt):
+        if kind == "delta" and payload:
+            with st.chat_message("assistant"):
+                st.markdown(payload)
+            st.session_state["messages"].append(
+                {"role": "assistant", "content": payload}
+            )
+        elif kind == "tool" and payload:
+            title_line = (
+                str(payload).splitlines()[0].strip() if payload else "Tool event"
+            )
+            if not title_line:
+                title_line = "Tool event"
+            with st.chat_message("assistant"):
+                with st.expander(title_line[:120], expanded=False):
+                    st.markdown(str(payload))
+            st.session_state["messages"].append(
+                {
+                    "role": "assistant",
+                    "content": str(payload),
+                    "foldable": True,
+                    "title": title_line[:120],
+                }
+            )
+        elif kind == "error" and payload:
+            with st.chat_message("assistant"):
                 st.markdown(str(payload))
-            elif kind == "tool" and payload:
-                st.markdown(str(payload))
-
-    # 3) store assistant turn
-    st.session_state["messages"].append(
-        {"role": "assistant", "content": assistant_accum}
-    )
+            st.session_state["messages"].append(
+                {"role": "assistant", "content": str(payload)}
+            )

@@ -332,8 +332,8 @@ def _resolve_path_from_id(file_id: str | None) -> str | None:
 def create_server():
     mcp = FastMCP(
         name="discovera_fastmcp",
-        instructions=server_instructions,
-        stateless_http=True
+        # instructions=server_instructions,
+        stateless_http=True,
     )
 
     def _coalesce_none_defaults(model_obj: Any) -> Any:
@@ -825,7 +825,9 @@ def create_server():
         Searches gene set tables in Rummagene by a term and extracts PMCIDs.
         """
         # Validate/construct params
-        params = _validate_params({"term": term}, QueryTableRummaInput, "query_table_rumma")
+        params = _validate_params(
+            {"term": term}, QueryTableRummaInput, "query_table_rumma"
+        )
 
         df = table_search_query(params.term)
         if df.empty or "term" not in df.columns:
@@ -841,7 +843,9 @@ def create_server():
         Retrieves detailed gene membership and annotations for a gene set.
         """
         # Validate/construct params
-        params = _validate_params({"gene_set_id": gene_set_id}, SetsInfoRummInput, "sets_info_rumm")
+        params = _validate_params(
+            {"gene_set_id": gene_set_id}, SetsInfoRummInput, "sets_info_rumm"
+        )
 
         df = genes_query(params.gene_set_id)
         logger.info("🛠️[sets_info_rumm] Sets info fetched successfully")
@@ -1210,7 +1214,7 @@ def main():
     server = create_server()
 
     try:
-        server.run(transport="sse", port=8000)
+        server.run(transport="sse", host="0.0.0.0", port=8000)
     except KeyboardInterrupt:
         logger.info("Server stopped by user")
     except Exception as e:
