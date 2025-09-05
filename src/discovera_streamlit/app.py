@@ -10,7 +10,9 @@ import httpx
 from dotenv import load_dotenv
 from langgraph.prebuilt import create_react_agent
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage, SystemMessage, HumanMessage
+from langgraph.checkpoint.memory import InMemorySaver
+from langchain_core.runnables import RunnableConfig
 
 # Load .env if present
 load_dotenv()
@@ -18,11 +20,11 @@ load_dotenv()
 # --- Config ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-MCP_ADDRESS = (
-    os.getenv("MCP_SERVER_ADDRESS")
-    or "http://127.0.0.1:8000/mcp"
-)
+MCP_ADDRESS = os.getenv("MCP_SERVER_ADDRESS") or "http://127.0.0.1:8000/mcp"
 MCP_TIMEOUT_MS = int(os.getenv("MCP_TIMEOUT_MS", "3500"))
+LANGGRAPH_CONFIG = RunnableConfig(
+    {"configurable": {"thread_id": "discovera_streamlit"}}
+)
 
 if not OPENAI_API_KEY:
     st.error("OPENAI_API_KEY missing in environment")
@@ -53,12 +55,16 @@ with st.expander("Connection", expanded=True):
                     for method in ("HEAD", "GET"):
                         try:
                             r = http.request(method, str(url))
-                            notes.append(f"{method} {url.raw_path.decode() or '/'} -> {r.status_code}")
+                            notes.append(
+                                f"{method} {url.raw_path.decode() or '/'} -> {r.status_code}"
+                            )
                             if r.status_code in (200, 202, 400, 404, 405):
                                 ok = True
                                 break
                         except Exception as e:
-                            notes.append(f"{method} {url.raw_path.decode() or '/'} -> {e}")
+                            notes.append(
+                                f"{method} {url.raw_path.decode() or '/'} -> {e}"
+                            )
 
                     # 2) If still not ok and URL has a path, probe server root
                     if not ok and (url.path or b""):
@@ -66,21 +72,33 @@ with st.expander("Connection", expanded=True):
                         for method in ("HEAD", "GET"):
                             try:
                                 r = http.request(method, str(root_url))
-                                notes.append(f"{method} {root_url.raw_path.decode()} -> {r.status_code}")
+                                notes.append(
+                                    f"{method} {root_url.raw_path.decode()} -> {r.status_code}"
+                                )
                                 if r.status_code in (200, 202, 400, 404, 405):
                                     ok = True
                                     break
                             except Exception as e:
-                                notes.append(f"{method} {root_url.raw_path.decode()} -> {e}")
+                                notes.append(
+                                    f"{method} {root_url.raw_path.decode()} -> {e}"
+                                )
 
                     # 3) If still not ok, attempt minimal MCP JSON-RPC list tools on configured URL
                     if not ok:
                         try:
-                            payload = {"jsonrpc": "2.0", "id": "1", "method": "tools/list"}
+                            payload = {
+                                "jsonrpc": "2.0",
+                                "id": "1",
+                                "method": "tools/list",
+                            }
                             r = http.post(
-                                str(url), json=payload, headers={"Content-Type": "application/json"}
+                                str(url),
+                                json=payload,
+                                headers={"Content-Type": "application/json"},
                             )
-                            notes.append(f"POST {url.raw_path.decode()} list -> {r.status_code}")
+                            notes.append(
+                                f"POST {url.raw_path.decode()} list -> {r.status_code}"
+                            )
                             ok = r.status_code in (200, 202)
                         except Exception as e:
                             notes.append(f"POST {url.raw_path.decode()} list -> {e}")
@@ -190,6 +208,13 @@ When interacting with the Rummagene API, you can access any or all of the follow
     - Show the results to the user after each function runs.
 
 ---
+### Tool use policy (critical)
+
+- At each step, call at most one tool.
+- Do not emit multiple tool calls in a single assistant message.
+- Always wait for the previous tool's result before deciding the next action.
+- If no tool is needed, respond directly to the user.
+- Prefer short, incremental actions; avoid speculative parallel calls.
 """
 
 with st.expander("Context", expanded=False):
@@ -208,8 +233,9 @@ st.divider()
 # --- Chat state ---
 if "messages" not in st.session_state:
     st.session_state["messages"] = []  # UI transcript: {role, content}
-if "history" not in st.session_state:
-    st.session_state["history"] = []  # Responses history: {role, content:[{type: input_text, text}]}
+if "checkpointer" not in st.session_state:
+    print("Creating checkpointer...")
+    st.session_state["checkpointer"] = InMemorySaver()
 
 # Show transcript
 for m in st.session_state["messages"]:
@@ -244,20 +270,26 @@ def _load_mcp_tools(server_url: str):
     return asyncio.run(client.get_tools())
 
 
-def _messages_from_transcript(transcript: List[Dict[str, Any]]):
-    msgs = []
-    for m in transcript:
-        role = m.get("role")
-        content = m.get("content", "")
-        if role in ("user", "assistant") and isinstance(content, str):
-            msgs.append({"role": role, "content": content})
-    return msgs
+def _system_message() -> SystemMessage:
+    return SystemMessage(content=server_instructions)
 
 
-def stream_langgraph(transcript: List[Dict[str, Any]]):
-    server_url = st.session_state.get("mcp_server") or MCP_ADDRESS
+def _human_message(prompt: str) -> HumanMessage:
     ctx = (st.session_state.get("context") or "").strip()
-    prompt = f"{server_instructions}\n\nContext:\n{ctx}" if ctx else server_instructions
+
+    return HumanMessage(
+        content=f"""
+    Context:
+    {ctx}
+
+    User Prompt:
+    {prompt}
+    """
+    )
+
+
+def stream_langgraph(prompt: str):
+    server_url = st.session_state.get("mcp_server") or MCP_ADDRESS
 
     # Build tools and agent
     try:
@@ -268,12 +300,18 @@ def stream_langgraph(transcript: List[Dict[str, Any]]):
 
     try:
         model_id = f"openai:{OPENAI_MODEL}"
-        agent = create_react_agent(model_id, tools=tools, prompt=prompt, version="v2")
+        agent = create_react_agent(
+            model_id,
+            tools=tools,
+            prompt=prompt,
+            version="v2",
+            checkpointer=st.session_state["checkpointer"],
+        )
     except Exception as e:
         yield ("error", f"[Agent init error] {e}")
         return
 
-    inputs = {"messages": _messages_from_transcript(transcript)}
+    inputs = {"messages": [_system_message(), _human_message(prompt)]}
 
     # Stream updates from the graph (agent thoughts + tool calls/results)
     def _stream_agent_updates():
@@ -281,7 +319,9 @@ def stream_langgraph(transcript: List[Dict[str, Any]]):
 
         async def _produce():
             try:
-                async for update in agent.astream(inputs, stream_mode="updates"):
+                async for update in agent.astream(
+                    inputs, config=LANGGRAPH_CONFIG, stream_mode="updates"
+                ):
                     q.put(update)
             except Exception as exc:  # surface errors back to main thread
                 q.put(("__error__", exc))
@@ -307,13 +347,21 @@ def stream_langgraph(transcript: List[Dict[str, Any]]):
             if not isinstance(update, dict):
                 continue
             for node_name, node_update in update.items():
-                messages_update = node_update.get("messages") if isinstance(node_update, dict) else None
+                messages_update = (
+                    node_update.get("messages")
+                    if isinstance(node_update, dict)
+                    else None
+                )
                 if not messages_update:
                     continue
                 for msg in messages_update:
                     # Agent messages ("thoughts"/content)
                     if isinstance(msg, AIMessage):
-                        content_text = msg.content if isinstance(msg.content, str) else str(msg.content)
+                        content_text = (
+                            msg.content
+                            if isinstance(msg.content, str)
+                            else str(msg.content)
+                        )
                         if content_text:
                             yield ("delta", content_text)
                         # Surface tool call intents
@@ -328,7 +376,9 @@ def stream_langgraph(transcript: List[Dict[str, Any]]):
                                 calls_render, default=str, indent=2
                             )
                             preview_json = (
-                                tool_calls_json if len(tool_calls_json) <= 2000 else tool_calls_json[:2000] + "…"
+                                tool_calls_json
+                                if len(tool_calls_json) <= 2000
+                                else tool_calls_json[:2000] + "…"
                             )
                             yield (
                                 "tool",
@@ -337,8 +387,16 @@ def stream_langgraph(transcript: List[Dict[str, Any]]):
                     # Tool results
                     elif isinstance(msg, ToolMessage):
                         tool_name = getattr(msg, "name", "tool") or "tool"
-                        tool_text = msg.content if isinstance(msg.content, str) else str(msg.content)
-                        preview = tool_text if len(tool_text) <= 1000 else (tool_text[:1000] + "…")
+                        tool_text = (
+                            msg.content
+                            if isinstance(msg.content, str)
+                            else str(msg.content)
+                        )
+                        preview = (
+                            tool_text
+                            if len(tool_text) <= 1000
+                            else (tool_text[:1000] + "…")
+                        )
                         yield (
                             "tool",
                             f"{tool_name} result:\n```\n{preview}\n```",
@@ -359,7 +417,7 @@ if prompt:
     with st.chat_message("assistant"):
         placeholder = st.empty()
         assistant_accum = ""
-        for kind, payload in stream_langgraph(st.session_state["messages"]):
+        for kind, payload in stream_langgraph(prompt):
             if kind == "delta" and payload:
                 assistant_accum += payload
                 placeholder.markdown(assistant_accum)
@@ -369,4 +427,6 @@ if prompt:
                 st.markdown(str(payload))
 
     # 3) store assistant turn
-    st.session_state["messages"].append({"role": "assistant", "content": assistant_accum})
+    st.session_state["messages"].append(
+        {"role": "assistant", "content": assistant_accum}
+    )
