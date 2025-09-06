@@ -17,8 +17,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from itertools import combinations
 from typing import Any, Dict, List, Optional
-
-import gseapy as gp
 import pandas as pd
 import traceback
 from dotenv import load_dotenv
@@ -44,7 +42,7 @@ from src.discovera_fastmcp.pydantic import (
     CsvReadInput,
     CountEdgesInput,
 )
-from src.discovera.bkd.gsea import plot_gsea_results
+from src.discovera.bkd.gsea import rank_gsea, nrank_ora
 from src.discovera.bkd.query_indra import nodes_batch, normalize_nodes
 from src.discovera.bkd.rummagene import (
     enrich_query,
@@ -392,12 +390,17 @@ def create_server():
         size: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        Queries the Indra database for relationships between the listed genes.
+        Query the INDRA database for relationships among a list of genes.
+
+        Args:
+            genes (List[str]): Gene symbols to query. For performance, keep ≤ 10 genes.
+            size (Optional[int]): Combination size (k) used when querying k-combinations of genes.
+                Defaults to 2.
 
         Returns:
-            pd.DataFrame: A dataframe containing the results of querying indra including this columns:
-                - 'nodes', 'type', 'subj.name', 'obj.name', 'belief', 'text', 'text_refs.PMID',
-                  'text_refs.DOI', 'text_refs.PMCID', 'text_refs.SOURCE', 'text_refs.READER', 'url'
+            Dict[str, Any]: Tabular results (as a dict) with columns such as:
+                - nodes, type, subj.name, obj.name, belief, text, text_refs.PMID,
+                  text_refs.DOI, text_refs.PMCID, text_refs.SOURCE, text_refs.READER, url
         """
         # Validate/construct params
         params = _validate_params(
@@ -488,19 +491,17 @@ def create_server():
         grouping: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Counts and groups interactions found in the dataset based on the specified grouping type.
+        Group and count interactions (edges) by a chosen grouping level.
 
         Args:
-            edges (List[Dict[str, Any]]): The DataFrame containing edge relationships.
-            grouping (str): The type of grouping to apply. Defaults to detailed. Options are:
-                - "summary": Groups only by 'nodes'.
-                - "detailed": Groups by 'nodes', 'type', 'subj.name', and 'obj.name'.
-                - "view": Groups by 'nodes' and 'type'.
-        Returns:
-            pd.DataFrame: A grouped DataFrame with a count column, sorted by count and type.
+            edges (List[Dict[str, Any]]): Edge records to aggregate (tabular dict format).
+            grouping (Optional[str]): One of "summary" | "detailed" | "view". Defaults to "detailed".
+                - summary: group by nodes
+                - detailed: group by nodes, type, subj.name, obj.name
+                - view: group by nodes, type
 
-        Raises:
-            ValueError: If an invalid group_type is provided.
+        Returns:
+            Dict[str, Any]: Grouped table with an added "count" column.
         """
         # Validate/construct params
         params = _validate_params(
@@ -554,6 +555,40 @@ def create_server():
         (e.g., healthy vs. diseased, treated vs. untreated). GSEA helps identify pathways
         that are significantly enriched in the data.
 
+        Args:
+            csv_id (str): ID of a stored CSV entry (required).
+            gene_sets (Optional[List[str]]): A list of predefined gene set collections used for enrichment analysis.
+                Defaults to ["KEGG_2016", "GO_Biological_Process_2023",
+                "Reactome_Pathways_2024", "MSigDB_Hallmark_2020"].
+                - KEGG_2016: Kyoto Encyclopedia of Genes and Genomes (metabolic and signaling pathways).
+                - GO_Biological_Process_2023: Gene Ontology (GO) focusing on biological processes
+                  (e.g., cell division, immune response).
+                - Reactome_Pathways_2024: Reactome database of curated molecular pathways.
+                - MSigDB_Hallmark_2020: Hallmark gene sets representing broad biological themes
+                  (e.g., inflammation, metabolism).
+                - GO_Molecular_Function_2015: GO category focusing on molecular functions
+                  (e.g., enzyme activity, receptor binding).
+                - GO_Cellular_Component_2015: GO category focusing on cellular locations
+                  (e.g., nucleus, membrane, mitochondria).
+
+            hit_col (str, optional): The column name in the dataset that contains gene symbols
+                (e.g., "VWA2", "TSC22D4", etc.). These will be used as identifiers
+                to match against gene sets during enrichment.
+                - Default is `"hit"` (usually the first column in the dataset).
+
+            corr_col (str, optional): The column in the ranked gene list containing correlation or scoring values,
+                which are used to rank genes by association with a condition.
+                - Default is `"corr"`.
+
+            min_size (int, optional): The minimum number of genes required for a gene set to be included
+                in the analysis.
+                - Default is `5` (gene sets with fewer than 5 genes are excluded).
+
+            max_size (int, optional): The maximum number of genes allowed in a gene set for it to be tested.
+                - Default is `200` (gene sets with more than 200 genes are excluded to maintain specificity).
+
+            threshold (float, optional): Defaults to 0.05.
+
         Returns:
             A dictionary containing the GSEA top 10 high NES and low NES results, and the full result metadata.
             Key attributes:
@@ -605,78 +640,86 @@ def create_server():
 
         # Convert Pydantic models to DataFrame or load from CSV
         try:
-            dataset_df = None
             csv_abs_path = _resolve_path_from_id(params.csv_id)
             if not csv_abs_path:
                 raise ValueError("Provide dataset or csv_id/csv_path")
-            dataset_df = pd.read_csv(csv_abs_path)
-            data_sorted = dataset_df.sort_values(by=params.corr_col, ascending=False)
-            data_sorted.reset_index(drop=True, inplace=True)
-            rnk_data = data_sorted[[params.hit_col, params.corr_col]]
 
-            # Perform the prerank analysis
-            results = gp.prerank(
-                rnk=rnk_data,
+            dataset_df = pd.read_csv(csv_abs_path)
+
+            # Use the newer rank_gsea which auto-maps IDs and filters by p/q thresholds
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            sorted_results = rank_gsea(
+                dataset=dataset_df,
                 gene_sets=params.gene_sets,
+                hit_col=params.hit_col,
+                corr_col=params.corr_col,
                 min_size=params.min_size,
                 max_size=params.max_size,
-                outdir=None,
-                verbose=True,
+                threshold=params.threshold,
+                timestamp=timestamp,
             )
-            results = pd.DataFrame(results.res2d)
-            results[["Data Base", "Pathway"]] = results["Term"].str.split(
-                "__", expand=True
-            )
-            _ensure_dir("output")
-            # raw_path = os.path.join("output", "gsea_results_raw.csv")
-            # results.to_csv(raw_path, index=False)
-            # try:
-            #     _register_file(
-            #         raw_path,
-            #         category="generated",
-            #         origin_tool="gsea_pipe",
-            #         tags=["gsea", "raw"],
-            #         metadata={
-            #             "hit_col": params.hit_col,
-            #             "corr_col": params.corr_col,
-            #         },
-            #     )
-            # except Exception:
-            #     pass
 
-            pval_columns = [
-                col for col in results.columns if "p-val" in col or "q-val" in col
-            ]
-            results = results[results[pval_columns].lt(params.threshold).any(axis=1)]
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"output/filtered_results_{timestamp}.csv"
-            results.to_csv(filename, index=False)
+            if isinstance(sorted_results, dict):
+                # Safety: in case rank_gsea returns a dict unexpectedly
+                sorted_results = pd.DataFrame(sorted_results)
+
+            if sorted_results is None or len(sorted_results) == 0:
+                logger.info("[gsea_pipe] No GSEA results after filtering")
+                return {
+                    "top_high_nes": {},
+                    "top_low_nes": {},
+                    "gsea_result_metadata": {},
+                }
+
+            # rank_gsea returns results sorted by NES ascending
+            top_low_nes = sorted_results.head(10)
+            top_high_nes = sorted_results.tail(10)
+
+            # Register generated CSV and plot paths produced by rank_gsea
+            _ensure_dir("output")
+            csv_path = os.path.join("output", f"gsea_results_{timestamp}.csv")
+            plot_path = os.path.join("output", f"gsea_results_{timestamp}.png")
+
+            gsea_csv_metadata = None
+            gsea_plot_metadata = None
+
             try:
-                gsea_result_metadata = _register_file(
-                    filename,
-                    category="generated",
-                    origin_tool="gsea_pipe",
-                    tags=["gsea", "filtered"],
-                    metadata={"threshold": params.threshold},
-                )
+                if os.path.exists(csv_path):
+                    gsea_csv_metadata = _register_file(
+                        csv_path,
+                        category="generated",
+                        origin_tool="gsea_pipe",
+                        tags=["gsea", "results"],
+                        metadata={
+                            "threshold": params.threshold,
+                            "hit_col": params.hit_col,
+                            "corr_col": params.corr_col,
+                        },
+                    )
             except Exception:
                 pass
-            logger.info(
-                (
-                    f"[gsea_pipe] Number of matching results with p-val smaller than "
-                    f"{params.threshold}: {len(results)}"
-                )
-            )
-            top_high_nes = results.sort_values(by="NES", ascending=False).head(10)
-            top_low_nes = results.sort_values(by="NES", ascending=True).head(10)
-            top_combined = pd.concat([top_high_nes, top_low_nes]).drop_duplicates()
 
-            plot_gsea_results(top_combined, timestamp)
+            try:
+                if os.path.exists(plot_path):
+                    gsea_plot_metadata = _register_file(
+                        plot_path,
+                        category="generated",
+                        origin_tool="gsea_pipe",
+                        tags=["gsea", "plot"],
+                        metadata={"timestamp": timestamp},
+                    )
+            except Exception:
+                pass
+
+            logger.info(
+                f"[gsea_pipe] Number of matching results with p/q-val < {params.threshold}: {len(sorted_results)}"
+            )
 
             return {
                 "top_high_nes": top_high_nes.to_dict(),
                 "top_low_nes": top_low_nes.to_dict(),
-                "gsea_result_metadata": gsea_result_metadata,
+                "gsea_result_metadata": gsea_csv_metadata,
+                "gsea_plot_metadata": gsea_plot_metadata,
             }
         except Exception as e:
             context = {
@@ -703,16 +746,24 @@ def create_server():
         (e.g., healthy vs. diseased, treated vs. untreated). ORA helps identify pathways
         that are significantly enriched in your data.
 
+        Args:
+            csv_id (str): ID of a stored CSV entry (required).
+            gene_col (Optional[str]): Column name in the CSV containing gene identifiers.
+                Supports symbols and common identifier types (Ensembl/Entrez/RefSeq/UniProt)
+                which will be auto-mapped to symbols. Defaults to "gene".
+            gene_sets (Optional[List[str]]): Predefined gene set collections used for enrichment.
+                Defaults to ["MSigDB_Hallmark_2020", "KEGG_2021_Human"].
+
         Returns:
-            pd.DataFrame: A DataFrame containing the ORA results, including,
+            pd.DataFrame: A DataFrame containing the ORA results, including:
                 - Term: The biological pathway or process being tested for enrichment.
                 - Overlap: The number of genes in the gene set that are also in the dataset.
-                - P-value: The statistical significance of the enrichment score.
-                - Adjusted P-value: The adjusted p-value to control for multiple testing.
+                - P-value: The statistical significance of the enrichment.
+                - Adjusted P-value: Multiple-testing corrected p-value (FDR).
                 - Odds Ratio: The ratio of the odds of the gene set being enriched
                   in the dataset to the odds of it not being enriched.
-                - Combined Score: The combined score of the gene set.
-                - Genes: The genes in the gene set.
+                - Combined Score: Combined strength metric of enrichment.
+                - Genes: The overlapping genes contributing to the enrichment.
         """
         # Validate/construct params
         params = _validate_params(
@@ -720,49 +771,56 @@ def create_server():
             OraPipeInput,
             "ora_pipe",
         )
-
-        # Drop NA values in the gene column
         try:
-            genes = []
             csv_abs_path = _resolve_path_from_id(params.csv_id)
             if not csv_abs_path:
                 raise ValueError("Provide csv_id")
+
             df_genes = pd.read_csv(csv_abs_path)
             gene_col = params.gene_col or "gene"
             if gene_col not in df_genes.columns:
                 raise ValueError(f"Column '{gene_col}' not found in CSV")
-            genes = df_genes[gene_col].dropna().astype(str).tolist()
-            # Run enrichment
-            enr = gp.enrichr(
-                gene_list=genes,
-                gene_sets=params.gene_sets,
-                organism="human",
-                outdir=None,
-                verbose=True,
-            )
-            results = pd.DataFrame(enr.results)
-            print(f"Number of matching results: {len(results)}")
+
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"output/ora_results_{timestamp}.csv"
-            results.to_csv(filename, index=False)
+            ora_results = nrank_ora(
+                dataset=df_genes,
+                gene_sets=params.gene_sets,
+                gene_col=gene_col,
+                organism="human",
+                timestamp=timestamp,
+            )
+
+            if isinstance(ora_results, dict):
+                ora_results = pd.DataFrame(ora_results)
+
+            if ora_results is None or len(ora_results) == 0:
+                logger.info("[ora_pipe] No ORA results after filtering")
+                return {"ora_results": {}, "ora_result_metadata": {}}
+
+            _ensure_dir("output")
+            csv_path = os.path.join("output", f"ora_results_{timestamp}.csv")
+
+            ora_result_metadata = None
             try:
-                ora_result_metadata = _register_file(
-                    filename,
-                    category="generated",
-                    origin_tool="ora_pipe",
-                    tags=["ora", "results"],
-                    metadata={"timestamp": timestamp},
-                )
+                if os.path.exists(csv_path):
+                    ora_result_metadata = _register_file(
+                        csv_path,
+                        category="generated",
+                        origin_tool="ora_pipe",
+                        tags=["ora", "results"],
+                        metadata={"timestamp": timestamp, "gene_col": gene_col},
+                    )
             except Exception:
                 pass
-            print("ORA results saved to", filename)
+
+            logger.info(f"[ora_pipe] Number of matching results: {len(ora_results)}")
             return {
-                "ora_results": results.to_dict(),
+                "ora_results": ora_results.to_dict(),
                 "ora_result_metadata": ora_result_metadata,
             }
         except Exception as e:
             context = {
-                "num_genes": len(genes),
+                "gene_col": gene_col if "gene_col" in locals() else None,
                 "gene_sets": params.gene_sets,
             }
             return _exception_payload("ora_pipe", e, context)
@@ -774,7 +832,15 @@ def create_server():
         max_records: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        Performs enrichment using the Rummagene GraphQL API for a list of genes.
+        Run enrichment using the Rummagene GraphQL API for a list of genes.
+
+        Args:
+            genes (List[str]): Gene symbols.
+            first (Optional[int]): Page size per request. Defaults to 30.
+            max_records (Optional[int]): Maximum total records to return. Defaults to 100.
+
+        Returns:
+            Dict[str, Any]: Tabular enrichment results.
         """
         # Validate/construct params
         params = _validate_params(
@@ -795,7 +861,14 @@ def create_server():
         retmax: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        Searches PubMed and maps articles to gene sets in Rummagene.
+        Search PubMed by a free-text term and map articles to gene sets via Rummagene.
+
+        Args:
+            term (str): Search keyword/phrase.
+            retmax (Optional[int]): Maximum PubMed Central IDs to retrieve. Defaults to 5000.
+
+        Returns:
+            Dict[str, Any]: Articles joined with mapped gene sets when available.
         """
         # Validate/construct params
         params = _validate_params(
@@ -822,7 +895,13 @@ def create_server():
     @mcp.tool()
     async def query_table_rumma(term: str) -> Dict[str, Any]:
         """
-        Searches gene set tables in Rummagene by a term and extracts PMCIDs.
+        Search Rummagene's gene set tables by a term and extract PMCIDs.
+
+        Args:
+            term (str): Keyword for searching curated gene set tables.
+
+        Returns:
+            Dict[str, Any]: Matching rows with extracted "pmcid" where present.
         """
         # Validate/construct params
         params = _validate_params(
@@ -840,7 +919,13 @@ def create_server():
     @mcp.tool()
     async def sets_info_rumm(gene_set_id: str) -> Dict[str, Any]:
         """
-        Retrieves detailed gene membership and annotations for a gene set.
+        Retrieve detailed gene membership and annotations for a specific gene set.
+
+        Args:
+            gene_set_id (str): UUID of the gene set.
+
+        Returns:
+            Dict[str, Any]: Gene membership and annotations.
         """
         # Validate/construct params
         params = _validate_params(
@@ -858,7 +943,15 @@ def create_server():
         batch_size: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        Plots a publication timeline and returns year-to-IDs map and image path.
+        Plot a PubMed publication timeline and return a year-to-IDs map and image path.
+
+        Args:
+            term (str): Keyword or phrase for PubMed timeline analysis.
+            email (str): Contact email required by NCBI Entrez API.
+            batch_size (Optional[int]): Entrez batch size. Defaults to 500.
+
+        Returns:
+            Dict[str, Any]: {"year_to_ids": dict, "image_path": str or None}.
         """
         # Validate/construct params
         params = _validate_params(
@@ -894,7 +987,15 @@ def create_server():
         email: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Prioritizes genes in the context of a disease or phenotype.
+        Prioritize genes in the context of a disease or phenotype.
+
+        Args:
+            gene_list (List[str]): Gene symbols to prioritize.
+            context_term (str): Disease/phenotype context.
+            email (Optional[str]): Contact email for PubMed queries. Optional.
+
+        Returns:
+            Dict[str, Any]: Ranked/prioritized genes as a table.
         """
         # Validate/construct params
         params = _validate_params(
@@ -911,7 +1012,13 @@ def create_server():
     @mcp.tool()
     async def gene_info(gene_list: List[str]) -> Dict[str, Any]:
         """
-        Fetches gene annotations from MyGene.info for a list of gene symbols.
+        Fetch gene annotations from MyGene.info for given gene symbols.
+
+        Args:
+            gene_list (List[str]): Gene symbols for annotation.
+
+        Returns:
+            Dict[str, Any]: Table of gene symbol, name, summary, aliases, etc.
         """
         # Validate/construct params
         params = _validate_params({"gene_list": gene_list}, GeneInfoInput, "gene_info")
@@ -939,7 +1046,21 @@ def create_server():
         max_bytes: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        List stored files with optional filters; optionally include content preview.
+        List stored files with optional filters and optional content preview.
+
+        Args:
+            origin_tool (Optional[str]): Filter by originating tool name.
+            tag (Optional[str]): Filter by a tag.
+            ext (Optional[str]): Filter by file extension (e.g., ".csv").
+            category (Optional[str]): Logical category (e.g., generated, user_input).
+            name_contains (Optional[str]): Substring match on filename.
+            since (Optional[str]): ISO timestamp to include files at or after this time.
+            until (Optional[str]): ISO timestamp to include files at or before this time.
+            with_content (Optional[bool]): If true, include content up to max_bytes.
+            max_bytes (Optional[int]): Max bytes to read when including content (default 1 MB).
+
+        Returns:
+            Dict[str, Any]: {"items": list} where each item is a stored file entry; content included if requested.
         """
         try:
             # Validate/construct params
@@ -993,7 +1114,15 @@ def create_server():
         max_bytes: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        Retrieve a stored file entry by id or path; optionally include content.
+        Retrieve a stored file entry by id; optionally include its content.
+
+        Args:
+            id (str): Storage entry id.
+            with_content (Optional[bool]): If true, include content up to max_bytes.
+            max_bytes (Optional[int]): Max bytes to read when including content (default 1 MB).
+
+        Returns:
+            Dict[str, Any]: Entry metadata and optional content.
         """
         try:
             # Validate/construct params
@@ -1038,7 +1167,21 @@ def create_server():
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Record a user-provided CSV into output/user_csvs and register it.
+        Save a CSV to output/user_csvs and register it in storage.
+
+        Exactly one of csv_text, csv_base64, csv_path, csv_url must be provided.
+
+        Args:
+            name (Optional[str]): Logical name for the CSV; used to derive filename.
+            csv_text (Optional[str]): CSV content as text.
+            csv_base64 (Optional[str]): CSV content as base64 (UTF-8 text expected).
+            csv_path (Optional[str]): Absolute path to a local CSV file.
+            csv_url (Optional[str]): URL to a CSV file.
+            tags (Optional[List[str]]): Tags to associate (e.g., user_input, dataset).
+            metadata (Optional[Dict[str, Any]]): Arbitrary metadata (e.g., source, description).
+
+        Returns:
+            Dict[str, Any]: Registered storage entry for the saved file.
         """
         try:
             # Validate/construct params
@@ -1162,7 +1305,14 @@ def create_server():
         n_rows: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        Read a stored CSV by id or path and return a preview of rows.
+        Read a stored CSV by id and return a preview of rows.
+
+        Args:
+            id (str): Storage id of the CSV.
+            n_rows (Optional[int]): Number of rows to preview. Defaults to 20.
+
+        Returns:
+            Dict[str, Any]: {"path": str, "columns": list, "rows": list, "total_rows": int}.
         """
         try:
             # Validate/construct params

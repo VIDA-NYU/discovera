@@ -358,6 +358,47 @@ with st.sidebar.expander("Context", expanded=True):
         st.session_state["context_uploads"].append(rec)
         return rec
 
+    # Reconcile removals from the uploader UI (handle clicks on the "x")
+    current_hashes_in_widget: set[str] = set()
+    current_names_in_widget: set[str] = set()
+    if uploaded_files:
+        for uf in uploaded_files:
+            try:
+                raw_now: bytes = uf.getvalue()
+            except Exception:
+                raw_now = b""
+            name_now = ""
+            try:
+                name_now = getattr(uf, "name", "") or ""
+            except Exception:
+                name_now = ""
+            if raw_now:
+                sha_now = hashlib.sha256(raw_now).hexdigest()
+                current_hashes_in_widget.add(sha_now)
+            if name_now:
+                current_names_in_widget.add(name_now)
+    else:
+        # None selected in widget; clear all tracked uploads
+        st.session_state["context_uploads"] = []
+        st.session_state["context_upload_hashes"] = set()
+
+    if current_hashes_in_widget or current_names_in_widget:
+        # Filter existing records by present hashes or names
+        existing_uploads = st.session_state.get("context_uploads") or []
+        filtered_uploads: List[Dict[str, Any]] = []
+        filtered_hashes: set[str] = set()
+        for rec in existing_uploads:
+            rec_hash = rec.get("hash") or ""
+            rec_name = rec.get("name") or ""
+            keep_by_hash = bool(rec_hash and rec_hash in current_hashes_in_widget)
+            keep_by_name = bool(rec_name and rec_name in current_names_in_widget)
+            if keep_by_hash or keep_by_name:
+                filtered_uploads.append(rec)
+                if rec_hash:
+                    filtered_hashes.add(rec_hash)
+        st.session_state["context_uploads"] = filtered_uploads
+        st.session_state["context_upload_hashes"] = filtered_hashes
+
     # Process uploads and append to context (deduplicated by content hash)
     new_records: List[Dict[str, Any]] = []
     if uploaded_files:
