@@ -93,7 +93,7 @@ def plot_gsea_results(
         outpath = os.path.join(folder, f"gsea_results_{timestamp}.png")
         plt.savefig(outpath, dpi=300, bbox_inches='tight')
         print(f"Plot saved: {outpath}")
-    plt.show()
+    # plt.show()
 
     return fig
 
