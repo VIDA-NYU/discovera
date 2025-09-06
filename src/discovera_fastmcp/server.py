@@ -1080,6 +1080,8 @@ def create_server():
                 text = str(params.csv_text)
                 if not text.strip():
                     raise ValueError("csv_text is empty")
+                # Remove UTF-8 BOM if present
+                text = text.lstrip("\ufeff")
                 try:
                     df = pd.read_csv(io.StringIO(text))
                 except Exception as e:
@@ -1089,7 +1091,8 @@ def create_server():
             elif source == "csv_base64":
                 try:
                     raw = base64.b64decode(params.csv_base64)
-                    text = raw.decode("utf-8")
+                    # Decode using UTF-8-SIG to drop BOM if present
+                    text = raw.decode("utf-8-sig")
                 except Exception as e:
                     raise ValueError(f"Invalid base64 CSV (must be UTF-8 text): {e}")
                 try:
@@ -1103,7 +1106,8 @@ def create_server():
                 if not os.path.exists(abs_in_path):
                     raise FileNotFoundError(f"File not found: {abs_in_path}")
                 try:
-                    df = pd.read_csv(abs_in_path)
+                    # Read with UTF-8-SIG to remove BOM if present
+                    df = pd.read_csv(abs_in_path, encoding="utf-8-sig")
                 except Exception as e:
                     raise ValueError(f"Failed to read CSV from path: {e}")
                 normalized_csv_text = df.to_csv(index=False)
@@ -1112,7 +1116,8 @@ def create_server():
                 try:
                     response = requests.get(params.csv_url, timeout=20)
                     response.raise_for_status()
-                    df = pd.read_csv(io.StringIO(response.text))
+                    # Parse from bytes and let pandas handle UTF-8-SIG to drop BOM
+                    df = pd.read_csv(io.BytesIO(response.content), encoding="utf-8-sig")
                 except Exception as e:
                     raise ValueError(f"Failed to read CSV from URL: {e}")
                 normalized_csv_text = df.to_csv(index=False)
