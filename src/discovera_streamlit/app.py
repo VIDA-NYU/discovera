@@ -41,8 +41,24 @@ if not OPENAI_API_KEY:
 
 st.set_page_config(page_title="Discovera Chat", page_icon="🧬", layout="centered")
 
+# Widen the sidebar to make MCP/Context panels wider
+st.markdown(
+    """
+    <style>
+    [data-testid="stSidebar"] {
+        width: 520px !important;
+        min-width: 520px !important;
+    }
+    [data-testid="stSidebar"] > div:first-child {
+        width: 520px !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 st.title("Discovera Chat 🧬")
-with st.expander("Connection", expanded=True):
+with st.sidebar.expander("Connection", expanded=True):
     col1, col2 = st.columns([3, 1])
     with col1:
         st.text_input(
@@ -190,9 +206,17 @@ When interacting with the Rummagene API, you can access any or all of the follow
 - Always wait for the previous tool's result before deciding the next action.
 - If no tool is needed, respond directly to the user.
 - Prefer short, incremental actions; avoid speculative parallel calls.
+
+### URL handling (critical)
+
+- URLs for uploaded files will appear in the context wrapped in <url> and </url> tags.
+- When calling csv_record/csv_read or any function requiring a URL, copy the text
+  between <url> and </url> EXACTLY as-is. Do not modify, reformat, or re-encode it.
+- Never insert spaces, line breaks, or change characters (e.g., keep "X-Amz-Algorithm"
+  with the dash intact). If unsure, use the exact substring between the tags.
 """
 
-with st.expander("Context", expanded=False):
+with st.sidebar.expander("Context", expanded=True):
     st.text_area(
         "Context (sent as instructions every turn)",
         key="context",
@@ -334,6 +358,47 @@ with st.expander("Context", expanded=False):
         st.session_state["context_uploads"].append(rec)
         return rec
 
+    # Reconcile removals from the uploader UI (handle clicks on the "x")
+    current_hashes_in_widget: set[str] = set()
+    current_names_in_widget: set[str] = set()
+    if uploaded_files:
+        for uf in uploaded_files:
+            try:
+                raw_now: bytes = uf.getvalue()
+            except Exception:
+                raw_now = b""
+            name_now = ""
+            try:
+                name_now = getattr(uf, "name", "") or ""
+            except Exception:
+                name_now = ""
+            if raw_now:
+                sha_now = hashlib.sha256(raw_now).hexdigest()
+                current_hashes_in_widget.add(sha_now)
+            if name_now:
+                current_names_in_widget.add(name_now)
+    else:
+        # None selected in widget; clear all tracked uploads
+        st.session_state["context_uploads"] = []
+        st.session_state["context_upload_hashes"] = set()
+
+    if current_hashes_in_widget or current_names_in_widget:
+        # Filter existing records by present hashes or names
+        existing_uploads = st.session_state.get("context_uploads") or []
+        filtered_uploads: List[Dict[str, Any]] = []
+        filtered_hashes: set[str] = set()
+        for rec in existing_uploads:
+            rec_hash = rec.get("hash") or ""
+            rec_name = rec.get("name") or ""
+            keep_by_hash = bool(rec_hash and rec_hash in current_hashes_in_widget)
+            keep_by_name = bool(rec_name and rec_name in current_names_in_widget)
+            if keep_by_hash or keep_by_name:
+                filtered_uploads.append(rec)
+                if rec_hash:
+                    filtered_hashes.add(rec_hash)
+        st.session_state["context_uploads"] = filtered_uploads
+        st.session_state["context_upload_hashes"] = filtered_hashes
+
     # Process uploads and append to context (deduplicated by content hash)
     new_records: List[Dict[str, Any]] = []
     if uploaded_files:
@@ -356,7 +421,9 @@ if "checkpointer" not in st.session_state:
     st.session_state["checkpointer"] = InMemorySaver()
 
 # Show transcript (supports foldable tool entries)
-for m in st.session_state["messages"]:
+
+
+for idx, m in enumerate(st.session_state["messages"]):
     role = m.get("role", "assistant")
     content = m.get("content", "")
     is_foldable = m.get("foldable", False)
@@ -364,9 +431,28 @@ for m in st.session_state["messages"]:
     with st.chat_message(role):
         if is_foldable:
             with st.expander(title, expanded=False):
-                st.markdown(content)
+                if role == "assistant":
+                    st.code(str(content), language="text")
+                else:
+                    st.markdown(content)
         else:
-            st.markdown(content)
+            if role == "assistant":
+                if "code_view_msgs" not in st.session_state:
+                    st.session_state["code_view_msgs"] = set()
+                code_view = st.session_state.get("code_view_msgs") or set()
+                showing_code = idx in code_view
+                if showing_code:
+                    st.code(str(content), language="text")
+                    if st.button("Back to text", key=f"btn_to_text_{idx}"):
+                        code_view.discard(idx)
+                        st.session_state["code_view_msgs"] = code_view
+                else:
+                    st.markdown(content)
+                    if st.button("Copy view", key=f"btn_to_code_{idx}"):
+                        code_view.add(idx)
+                        st.session_state["code_view_msgs"] = code_view
+            else:
+                st.markdown(content)
 
 # Compose
 prompt = st.chat_input("Ask anything…")
@@ -408,7 +494,7 @@ def _context() -> str:
 Name: {rec['name']}
   Preview:
     {rec['preview']}
-  Download URL: {rec['url']}
+  Download URL: <url>{rec['url']}</url>
   Type: {rec['type']}
 """
     return ctx

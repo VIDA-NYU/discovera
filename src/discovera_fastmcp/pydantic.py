@@ -90,7 +90,7 @@ A list of gene names to query in Indra.
         default=2,
         description="""
 The size of the gene combinations. Defaults to 2.
-"""
+""",
     )
 
 
@@ -227,7 +227,7 @@ Each item should include columns matching the chosen grouping.
         description="""
 Grouping mode. One of: "summary" | "detailed" | "view".
 Defaults to "detailed".
-"""
+""",
     )
 
 
