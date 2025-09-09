@@ -541,9 +541,9 @@ def create_server():
     @mcp.tool()
     async def gsea_pipe(
         csv_id: str,
+        hit_col: str = "hit",
+        corr_col: str = "corr",
         gene_sets: Optional[List[str]] = None,
-        hit_col: Optional[str] = None,
-        corr_col: Optional[str] = None,
         min_size: Optional[int] = None,
         max_size: Optional[int] = None,
         threshold: Optional[float] = None,
@@ -557,6 +557,15 @@ def create_server():
 
         Args:
             csv_id (str): ID of a stored CSV entry (required).
+
+            hit_col (str): The column name in the dataset that contains gene symbols
+                (e.g., "VWA2", "TSC22D4", etc.). These will be used as identifiers
+                to match against gene sets during enrichment (required).
+                - Usually the first column in the dataset.
+
+            corr_col (str): The column in the ranked gene list containing correlation or scoring values,
+                which are used to rank genes by association with a condition (required).
+
             gene_sets (Optional[List[str]]): A list of predefined gene set collections used for enrichment analysis.
                 Defaults to ["KEGG_2016", "GO_Biological_Process_2023",
                 "Reactome_Pathways_2024", "MSigDB_Hallmark_2020"].
@@ -570,15 +579,6 @@ def create_server():
                   (e.g., enzyme activity, receptor binding).
                 - GO_Cellular_Component_2015: GO category focusing on cellular locations
                   (e.g., nucleus, membrane, mitochondria).
-
-            hit_col (str, optional): The column name in the dataset that contains gene symbols
-                (e.g., "VWA2", "TSC22D4", etc.). These will be used as identifiers
-                to match against gene sets during enrichment.
-                - Default is `"hit"` (usually the first column in the dataset).
-
-            corr_col (str, optional): The column in the ranked gene list containing correlation or scoring values,
-                which are used to rank genes by association with a condition.
-                - Default is `"corr"`.
 
             min_size (int, optional): The minimum number of genes required for a gene set to be included
                 in the analysis.
@@ -736,7 +736,7 @@ def create_server():
     @mcp.tool()
     async def ora_pipe(
         csv_id: str,
-        gene_col: Optional[str] = None,
+        gene_col: str = "gene",
         gene_sets: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
@@ -748,7 +748,7 @@ def create_server():
 
         Args:
             csv_id (str): ID of a stored CSV entry (required).
-            gene_col (Optional[str]): Column name in the CSV containing gene identifiers.
+            gene_col (str): Column name in the CSV containing gene identifiers (required).
                 Supports symbols and common identifier types (Ensembl/Entrez/RefSeq/UniProt)
                 which will be auto-mapped to symbols. Defaults to "gene".
             gene_sets (Optional[List[str]]): Predefined gene set collections used for enrichment.
@@ -786,7 +786,7 @@ def create_server():
                 dataset=df_genes,
                 gene_sets=params.gene_sets,
                 gene_col=gene_col,
-                organism="human",
+                # organism="human",
                 timestamp=timestamp,
             )
 

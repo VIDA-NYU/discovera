@@ -4,20 +4,25 @@ import matplotlib.pyplot as plt
 import os
 import mygene
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from datetime import datetime
-
 
 # =========================
 # Utility helpers
 # =========================
+
+
 def get_timestamp():
     """Generate a single timestamp string."""
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
+
 def ensure_output_dir(path="output"):
     os.makedirs(path, exist_ok=True)
     return path
+
 
 def save_with_timestamp(df, prefix, timestamp, ext="csv", folder="output"):
     """Save DataFrame with consistent timestamped filename."""
@@ -27,26 +32,32 @@ def save_with_timestamp(df, prefix, timestamp, ext="csv", folder="output"):
     print(f"Saved: {filename}")
     return filename
 
+
 def pval_to_stars(p):
     """Convert p-value to significance stars."""
-    if p < 0.001: return '***'
-    elif p < 0.01: return '**'
-    elif p < 0.05: return '*'
+    if p < 0.001:
+        return '***'
+    elif p < 0.01:
+        return '**'
+    elif p < 0.05:
+        return '*'
     return ''
 
 # =========================
 # Plotting
 # =========================
+
+
 def plot_gsea_results(
-        df, 
+        df,
         timestamp=get_timestamp(),
-        nes_col='NES', 
-        pval_col='FDR q-val', 
-        pathway_col='Pathway', 
+        nes_col='NES',
+        pval_col='FDR q-val',
+        pathway_col='Pathway',
         db_col='Data Base',
         save=True,
         folder="output",
-    ):
+):
     """
     Plot GSEA results with NES values and significance stars for multiple databases.
     """
@@ -63,8 +74,8 @@ def plot_gsea_results(
     for ax, db in zip(axes, databases):
         df_db = df[df[db_col] == db].sort_values(nes_col)
         bars = ax.barh(
-            df_db[pathway_col], 
-            df_db[nes_col], 
+            df_db[pathway_col],
+            df_db[nes_col],
             color=['#d73027' if x < 0 else '#4575b4' for x in df_db[nes_col]]
         )
         # Add stars
@@ -80,7 +91,6 @@ def plot_gsea_results(
                     fontsize=12,
                     fontweight='bold'
                 )
-        
         ax.axvline(0, color='grey', linestyle='--')
         ax.set_ylabel('Pathway')
         ax.set_title(f'{db} Pathways')
@@ -94,47 +104,86 @@ def plot_gsea_results(
         plt.savefig(outpath, dpi=300, bbox_inches='tight')
         print(f"Plot saved: {outpath}")
     # plt.show()
-
     return fig
-
-
 # =========================
 # Analysis functions
 # =========================
 
+
 def detect_id_type(ids):
     """Quick heuristic — mainly for info, not strict enforcement."""
     sample = list(map(str, ids[:10]))
-    if any(x.startswith(("ENSG","ENSMUSG","ENST","ENSMUST","ENSP","ENSMUSP")) for x in sample):
+    if any(x.startswith(("ENSG", "ENSMUSG", "ENST", "ENSMUST", "ENSP", "ENSMUSP")) for x in sample):
         return "ensembl.gene"
     elif all(x.isdigit() for x in sample):
         return "entrezgene"
-    elif any(x.startswith(("NM_","NR_")) for x in sample):
+    elif any(x.startswith(("NM_", "NR_")) for x in sample):
         return "refseq"
     elif any(re.match(r"^[OPQ][0-9][A-Z0-9]{3,}", x) for x in sample):
         return "uniprot"
     else:
         return "symbol"
 
-def map_to_symbol(df, gene_col, default_species="human"):
+
+def map_to_symbol(df, gene_col):
     # strip Ensembl version suffix if present
     df[gene_col] = df[gene_col].astype(str).str.replace(r"\.\d+$", "", regex=True)
-    ids = df[gene_col].tolist()
+    ids = df[gene_col].dropna().astype(str).tolist()
 
     # Instead of detecting a single type, allow mixed IDs
     possible_scopes = ["ensembl.gene", "entrezgene", "refseq", "uniprot", "symbol"]
 
+    # Deduplicate to reduce API load
+    unique_ids = list(pd.unique(ids))
+    if not unique_ids:
+        return df.assign(symbol=pd.NA)
+
+    # Chunking and parallel querying
+    chunk_size = int(os.environ.get("MYGENE_CHUNK_SIZE", "1000"))
+    max_workers = int(os.environ.get("MYGENE_WORKERS", "4"))
+    pause_between_chunks_s = float(os.environ.get("MYGENE_THROTTLE_SECONDS", "0.0"))
+
+    def chunks(lst, n):
+        for i in range(0, len(lst), n):
+            yield lst[i: i + n]
+
     mg = mygene.MyGeneInfo()
-    mapping = mg.querymany(
-        ids,
-        scopes=possible_scopes,      # let mygene resolve mixed types
-        fields="symbol",
-        species=default_species,
-        as_dataframe=True
-    ).reset_index()
+
+    def fetch_chunk(id_chunk):
+        try:
+            res = mg.querymany(
+                id_chunk,
+                scopes=possible_scopes,
+                fields="symbol",
+                as_dataframe=True,
+            )
+            # Ensure DataFrame with 'query' as a column
+            res = res.reset_index() if hasattr(res, "reset_index") else pd.DataFrame()
+            return res
+        except Exception:
+            return pd.DataFrame(columns=["query", "symbol"])  # fail-soft
+
+    results = []
+    id_chunks = list(chunks(unique_ids, chunk_size))
+
+    # Use a small pool to avoid rate limits; throttle between completions if requested
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_idx = {executor.submit(fetch_chunk, c): idx for idx, c in enumerate(id_chunks)}
+        for future in as_completed(future_to_idx):
+            df_chunk = future.result()
+            if isinstance(df_chunk, pd.DataFrame) and not df_chunk.empty:
+                results.append(df_chunk)
+            if pause_between_chunks_s > 0:
+                time.sleep(pause_between_chunks_s)
+
+    if results:
+        mapping = pd.concat(results, ignore_index=True)
+    else:
+        mapping = pd.DataFrame(columns=["query", "symbol"])
 
     # keep only useful mappings
-    mapping = mapping[["query", "symbol"]].dropna().drop_duplicates()
+    if not mapping.empty:
+        mapping = mapping[["query", "symbol"]].dropna().drop_duplicates()
 
     # merge back with df
     df_merged = df.merge(mapping, left_on=gene_col, right_on="query", how="left")
@@ -157,6 +206,8 @@ def rank_gsea(dataset, gene_sets, hit_col, corr_col,
 
     data_sorted = dataset.sort_values(by=corr_col, ascending=False).reset_index(drop=True)
     rnk_data = data_sorted[[hit_col, corr_col]].dropna()
+    # Set index to hit_col
+    rnk_data.set_index(hit_col, inplace=True)
 
     try:
         results = gp.prerank(
@@ -176,7 +227,7 @@ def rank_gsea(dataset, gene_sets, hit_col, corr_col,
         print("GSEA returned no results.")
         return results_df
 
-    results_df[['Data Base','Pathway']] = results_df['Term'].str.split('__', expand=True)
+    results_df[['Data Base', 'Pathway']] = results_df['Term'].str.split('__', expand=True)
     pval_columns = [col for col in results_df.columns if "p-val" in col or "q-val" in col]
     results_df = results_df[results_df[pval_columns].lt(threshold).any(axis=1)]
 
@@ -196,7 +247,7 @@ def nrank_ora(
     dataset,
     gene_sets,
     gene_col,
-    organism="human",
+    # organism="human",
     timestamp=None
 ):
     """
@@ -211,7 +262,7 @@ def nrank_ora(
     id_type = detect_id_type(sample_ids)
     if id_type != "symbol":
         print(f"Converting {id_type} IDs to gene symbols...")
-        dataset = map_to_symbol(dataset, gene_col=gene_col, default_species=organism)
+        dataset = map_to_symbol(dataset, gene_col=gene_col)
         gene_col = "symbol"  # mapped column
     else:
         print("Detected input as gene symbols, no conversion needed.")
@@ -229,7 +280,7 @@ def nrank_ora(
         enr = gp.enrichr(
             gene_list=genes,
             gene_sets=gene_sets,
-            organism=organism,
+            # organism=organism,
             outdir=None,
             verbose=True
         )
@@ -242,9 +293,8 @@ def nrank_ora(
         print("Enrichr returned no results.")
         return results
 
-    results = results[results["Adjusted P-value"] < 0.05]   # keep significant
-    results = results.sort_values(by="Combined Score", ascending=False)  # rank by strength
-
+    results = results[results["Adjusted P-value"] < 0.05]
+    results = results.sort_values(by="Combined Score", ascending=False)
     save_with_timestamp(results, "ora_results", timestamp)
     print(f"Number of matching results: {len(results)}")
 
