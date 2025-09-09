@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 
 from functools import reduce
 
@@ -125,3 +126,77 @@ def calculate_agreement(df, col_gt='prediction_usinggt', col_gen='prediction_usi
         print(f"Error calculating dataset agreement: {e}")
         return None
     
+
+def plot_report_level_agreement(df, output_dir: str):
+    """
+    Plot report-level agreement statistics.
+    
+    Args:
+        csv_file: Path to the CSV file containing predictions
+        output_dir: Directory to save the plot
+        reference: Reference type ('gt' or 'gen')
+    """
+    try:
+        report_agreements = []
+        
+        # Calculate agreement percentage for each report
+        print(len(df['report_id'].unique()))
+        for report_id in df['report_id'].unique():
+            report_df = df[df['report_id'] == report_id]
+            total = len(report_df)
+            matches = len(report_df[report_df['prediction_usinggt'] == 
+                                  report_df['prediction_usingllm']])
+            agreement_pct = (matches / total) * 100 if total > 0 else 0
+            report_agreements.append(agreement_pct)
+        
+        # Create plot
+        plt.figure(figsize=(10, 6))
+        plt.hist(report_agreements, bins=20, edgecolor='black')
+        plt.xlabel('Agreement Percentage', fontsize=24, fontweight='bold', labelpad=15)
+        plt.ylabel('Number of Reports', fontsize=24, fontweight='bold', labelpad=15)
+        # plt.title(f'Distribution of GT-GEN Agreement Across Reports\n({reference.upper()} Reference)', fontsize=24)
+        plt.xticks(fontsize=22, weight='bold')
+        plt.yticks(fontsize=22, weight='bold')
+        
+        # Add mean and std dev lines
+        mean_agreement = np.mean(report_agreements)
+        print(mean_agreement)
+        std_agreement = np.std(report_agreements)
+        plt.axvline(mean_agreement, color='r', linestyle='dashed', linewidth=2, 
+                   label=f'Mean: {mean_agreement:.1f}%')
+        plt.axvline(mean_agreement + std_agreement, color='g', linestyle=':', linewidth=2,
+                   label=f'SD: {std_agreement:.1f}%')
+        plt.axvline(mean_agreement - std_agreement, color='g', linestyle=':', linewidth=2)
+        
+        plt.legend(fontsize=24, prop={'weight': 'bold', 'size': 16})
+        plt.grid(True, alpha=0.3)
+        
+        # Save plot
+        plot_file = os.path.join(output_dir, f'mcq_eval_report_level_agreement_hist.png')
+        plt.savefig(plot_file, dpi=600, bbox_inches='tight')
+        plt.show()
+        plt.close()
+        
+        # Save report-level statistics
+        report_stats = pd.DataFrame({
+            'Report_ID': df['report_id'].unique(),
+            'Agreement_Percentage': report_agreements
+        })
+        stats_file = os.path.join(output_dir, f'mcq_eval_report_level_stats.csv')
+        report_stats.to_csv(stats_file, index=False)
+
+        aggregated_stats_file = os.path.join(output_dir, f'mcq_eval_report_level_stats_aggregated.csv')
+        aggregated_stats = pd.DataFrame({
+            'Mean_Agreement': [mean_agreement],
+            'Std_Deviation': [std_agreement]
+        })
+        aggregated_stats.to_csv(aggregated_stats_file, index=False)
+        
+        print(f"\nReport-level statistics:")
+        print(f"Mean agreement: {mean_agreement:.1f}%")
+        print(f"Standard deviation: {std_agreement:.1f}%")
+        print(f"Plot saved to {plot_file}")
+        print(f"Report-level statistics saved to {stats_file}")
+        
+    except Exception as e:
+        print(f"Error plotting report-level agreement: {e}")
