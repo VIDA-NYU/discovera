@@ -5,7 +5,7 @@ import json
 import re
 import csv
 
-from typing import List, Callable, Optional, Union, Dict, Any
+from typing import List, Callable, Optional, Union, Dict, Any, Tuple
 from tqdm import tqdm
 from collections import Counter
 from statistics import mode, StatisticsError
@@ -29,21 +29,63 @@ def load_openai_key(beaker_conf_path="../.beaker.conf"):
     
     return openai_api_key
 
+
 def load_reports(
-    csv_path: str, 
-    report_column: str = "Ground Truth", 
-    #id_column: str = "ID", 
-    source: str = "gt"):
+    csv_path: str,
+    report_column: str = "Ground Truth",
+    task_id: str = "ID",
+    prompt: Optional[str] = "Prompt"
+) -> List[Tuple[str, str, Optional[str], str]]:
+    """
+    Load structured reports from a CSV file.
+
+    Parameters
+    ----------
+    csv_path : str
+        Path to the CSV file containing the reports.
+    report_column : str, optional
+        Column name containing the main report text. Default is "Ground Truth".
+    task_id : str, optional
+        Column name containing the unique ID for each task. Default is "ID".
+    prompt : str, optional
+        Column name containing associated prompt/context. Default is "Prompt".
+        If the column does not exist, None is returned for all rows.
+
+    Returns
+    -------
+    List[Tuple[str, str, Optional[str], str]]
+        A list of tuples for each valid report:
+        (
+            task_idx : str              - Task ID (periods removed),
+            report_text : str           - Report text,
+            report_prompt : str or None - Prompt text if exists,
+            source : str                - Report source. Lowercased, space-stripped report column name.
+        )
+    """
     reports = []
+    source = report_column
+
     with open(csv_path, newline='', encoding='utf-8') as f:
         reader = csv.DictReader(f)
-        for idx, row in enumerate(reader):
-            #report_id = row.get(id_column)
+        # Normalize headers for safe lookup
+        reader.fieldnames = [h.strip() for h in reader.fieldnames]
+
+        for i, row in enumerate(reader, start=1):
+            # Safe retrieval of columns
+            raw_task_id = row.get(task_id)
             report_text = row.get(report_column)
-            if report_text and report_text.strip():
-                report_key = f"{source}_{idx}"
-                #reports.append((report_key, report_id, report_text))
-                reports.append((report_key, report_text))
+            report_prompt = row.get(prompt) if prompt in row else None
+
+            if not raw_task_id:
+                print(f"Warning: Missing {task_id} in row {i}. Skipping row.")
+                continue
+
+            if not report_text or not report_text.strip():
+                continue
+
+            task_idx = raw_task_id.replace(".", "")
+            source = source.lower().replace(" ", "")
+            reports.append((task_idx, report_text, report_prompt, source))
 
     return reports
 
@@ -76,6 +118,7 @@ class OpenAILLM:
             except Exception:
                 content_clean = re.sub(r"^```json\s*|\s*```$", "", content, flags=re.DOTALL).strip()
                 return json.loads(content_clean)
+            
 
 def get_llm(backend: str, model: str = None, **kwargs):
     """
@@ -107,59 +150,51 @@ def get_llm(backend: str, model: str = None, **kwargs):
     else:
         raise ValueError(f"Unknown LLM backend: {backend}")
 
-def multiple_questions_template(report_text: str, n: int) -> str:
+
+
+def multiple_questions_template(report_text: str, prompt: str, n: int) -> str:
     return f"""
-    You are a biomedical researcher. Your task is to generate {n} multiple-choice questions based strictly on the report below.
-    
-    --- BEGIN REPORT ---
-    {report_text}
-    --- END REPORT ---
-    
-    Instructions:
-    - The questions must be fully answerable using ONLY the content of the report above.
-    - Do NOT use outside knowledge or assumptions.
-    - Each question should have exactly five answer choices labeled as follows:
-      A. <choice text>
-      B. <choice text>
-      C. <choice text>
-      D. <choice text>
-      E. Insufficient information
-    - The choices themselves should be strings starting with the letter and period, e.g. "A. Pathway A".
-    - Provide the correct answer as a single uppercase letter: "A", "B", "C", "D", or "E".
-    
-    Output format:
-    A JSON list of {n} objects, where each object contains:
-    - "question": string,
-    - "choices": list of 5 strings (each starting with "A. ", "B. ", etc., last one is "E. Insufficient information"),
-    - "correct": string (one of "A", "B", "C", "D", or "E")
-    
-    Example output:
-    [
-      {{
-        "question": "What pathway was most enriched in the analysis?",
-        "choices": [
-          "A. Pathway A",
-          "B. Pathway B",
-          "C. Pathway C",
-          "D. Pathway D",
-          "E. Insufficient information"
-        ],
-        "correct": "A"
-      }},
-      {{
-        "question": "What gene was mutated?",
-        "choices": [
-          "A. Gene X",
-          "B. Gene Y",
-          "C. Gene Z",
-          "D. Gene W",
-          "E. Insufficient information"
-        ],
-        "correct": "E"
-      }},
-      ...
-    ]
-    """
+        You are a biomedical researcher. Your task is to generate up to {n} multiple-choice questions strictly based on the analysis provided below.
+        The analysis answers the following quiding question: {prompt}.
+        --- BEGIN ANALYSIS ---
+        {report_text}
+        --- END ANALYSIS ---
+
+        Instructions:
+        1. First, identify the most important findings, mechanisms, or insights in the analysis that directly contribute to answering the main question above.
+        2. Formulate questions only from these central points. Exclude background details or minor observations.
+        3. Avoid questions that rely on numerical values, dates, or excessively specific facts.
+        4. Do NOT use knowledge outside of the analysis.
+        5. Ensure all questions are conceptual, inferential, or analytical, emphasizing reasoning, implications, and relationships.
+        6. Each question must have exactly four answer choices, formatted as follows:
+            A. <choice text>
+            B. <choice text>
+            C. <choice text>
+            D. <choice text>
+        7. For each question, indicate the single correct answer as an uppercase letter: "A", "B", "C", or "D".
+
+        Output format:
+        A JSON list of {n} objects, where each object contains:
+        - "question": string
+        - "choices": list of 4 strings (each starting with "A. ", "B. ", etc.)
+        - "correct": string (one of "A", "B", "C", "D")
+
+        Example output:
+        [
+        {{
+            "question": "What pathway was most enriched in the analysis?",
+            "choices": [
+            "A. Pathway A",
+            "B. Pathway B",
+            "C. Pathway C",
+            "D. Pathway D"
+            ],
+            "correct": "A"
+        }}
+        ...
+        ]
+        """.strip()
+
 
 
 def answer_prompt_template(
@@ -168,10 +203,9 @@ def answer_prompt_template(
     if report:
         prompt = f"""
         You are a biomedical domain expert. Use ONLY the information provided in the report below to answer the question.
-
-        --- BEGIN REPORT ---
+        --- BEGIN ANALYSIS ---
         {report}
-        --- END REPORT ---
+        --- END ANALYSIS ---
 
         Question:
         {question}
@@ -181,16 +215,14 @@ def answer_prompt_template(
         {choices[1]}
         {choices[2]}
         {choices[3]}
-        {choices[4]}
 
         Instructions:
-        - Select the best choice ONLY if it is explicitly stated or can be directly inferred from the report.
+        - Select the best choice if it is explicitly stated or can be directly inferred from the analysis.
         - Do NOT use any outside knowledge, assumptions, or speculation.
-        - If the answer cannot be determined from the report, respond with "E".
         
         Respond ONLY in this JSON format:
         {{
-          "answer": "<A/B/C/D/E>",
+          "answer": "<A/B/C/D",
           "confidence": <float between 0 and 1>
         }}
         """.strip()
@@ -206,16 +238,14 @@ def answer_prompt_template(
         {choices[1]}
         {choices[2]}
         {choices[3]}
-        {choices[4]}
 
         Instructions:
         - Answer the question based on your biomedical knowledge.
         - Provide the best choice letter ("A", "B", "C", or "D") and a confidence score between 0 and 1.
-        - If you cannot confidently answer, respond with "E".
 
         Respond ONLY in this JSON format:
         {{
-          "answer": "<A/B/C/D/E>",
+          "answer": "<A/B/C/D>",
           "confidence": <float between 0 and 1>
         }}
         """.strip()
@@ -229,8 +259,7 @@ def generate_questions(
     provider: str = "openai",
     model: str = "gpt-4o",
     num_questions: Union[int, Dict[str, int]] = 20,
-    output_path: Optional[str] = None,
-    source: Optional[str] = None
+    output_path: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
     Generate multiple-choice questions (MCQs) from a collection of reports.
@@ -265,10 +294,6 @@ def generate_questions(
             If provided, the generated questions will also be written to this
             path as a JSON file. Defaults to None.
         
-        source (Optional[str], optional): 
-            A string tag indicating the provenance of the reports, whether they are ground truth
-            or LLM-generated. (e.g., "llm" --> LLM-generated, "gt"--> Ground Truth). 
-            Defaults to None.
 
     Returns:
         List[Dict[str, Any]]: 
@@ -295,8 +320,10 @@ def generate_questions(
     custom_counts = isinstance(num_questions, dict)
 
     for report in tqdm(reports, desc="Processing Reports"):
-        report_id = report[0]
-        report_text = report[2] if len(report) > 2 else report[1]
+        task_id = report[0]
+        report_text = report[1] 
+        prompt = report[2]
+        type_report = report[3]
         
         # Decide per-report question count
         if custom_counts:
@@ -307,23 +334,23 @@ def generate_questions(
         else:
             count = num_questions  # single fixed integer
 
-        prompt = prompt_template(report_text, count)
+        prompt = prompt_template(report_text, prompt, count)
 
         try:
             mcqs = llm.run(prompt, json_output=True)
             if isinstance(mcqs, list):
                 for q in mcqs:
                     all_questions.append({
-                        "report_id": report_id,
+                        "task_id": task_id,
                         "question": q.get("question", ""),
                         "choices": q.get("choices", []),
                         "answer": q.get("correct", ""),
-                        "question_source": source
+                        "question_source": type_report
                     })
             else:
-                print(f"[WARNING] Unexpected format for {report_id}")
+                print(f"[WARNING] Unexpected format for {task_id}")
         except Exception as e:
-            print(f"[ERROR] Report {report_id} failed: {e}")
+            print(f"[ERROR] Report {task_id} failed: {e}")
 
     elapsed = time.time() - start_time
     print(f"[INFO] Completed in {elapsed:.2f} seconds. Total questions: {len(all_questions)}")
@@ -335,7 +362,7 @@ def generate_questions(
             f"{num_questions}" if not custom_counts
             else f"cus"
         )
-        filename = f"qs{suffix}__rs{source}_{provider}_{model.replace('/', '-')}.json"
+        filename = f"qs{suffix}_rs{type_report}_{provider}_{model.replace('/', '-')}.json"
         file_path = os.path.join(output_path, filename)
         try:
             with open(file_path, 'w', encoding='utf-8') as f:
@@ -352,33 +379,30 @@ def respond_question(
     provider: str = "openai",
     model: str = "gpt-4o",
     reports: list[tuple[str, str]] = None,
-    output_path: str = None,
-    report_type: Optional[str] = None
-) -> List[Dict]:
+    output_path: str = None
+    ) -> List[Dict]:
     """
     Evaluate MCQs by asking an LLM to answer them, optionally using the associated report text.
 
     Args:
         questions: List of dicts with keys: question, choices, correct, report_id.
-        reports: List of tuples (report_key, report_text)
+        provider: LLM provider (e.g., "openai").
+        model: LLM model name (e.g., "gpt-4o").
+        reports: List of tuples (report_key, report_text, prompt, source).
         output_path: Optional path to save the output
-        source: The source label to use in the output metadata
-
     Returns:
         List of dicts with answer, confidence, question, correct answer, etc.
     """
-    reports = {r[0]: r[1] for r in reports}
-    #print(reports)
+    reports_dict = {r[0]: r[1] for r in reports}
     llm = get_llm(provider, model, api_key=load_openai_key())
     start_time = time.time()
 
     print(f"[INFO] Starting to answer questions ...\n")
     results = []
     # 1. Count how many questions are associated with each report
-    report_question_counts = Counter(q["report_id"] for q in questions)
+    report_question_counts = Counter(q["task_id"] for q in questions)
     counts = list(report_question_counts.values())
-    report_type = report_type or "wo"
-    #print(report_type)
+    report_type = reports[0][-1]
     # 2. Determine the mode of question counts per report
     try:
         questions_mode = mode(counts)
@@ -387,24 +411,23 @@ def respond_question(
         questions_mode = Counter(counts).most_common(1)[0][0]
 
     for q in tqdm(questions, desc= "Answering Questions"):
-        if report_type in ("gt", "llm"):
-            idx = q["report_id"].split("_", 1)
-            #print(f"{report_type}_{idx[1]}")
-            report_text = reports.get(f"{report_type}_{idx[1]}", "")
-            #print(report_text)
-            print(f"[INFO] Answering questions with access to report text ...\n")
+
+        if reports == None:
+            print(f"[INFO] Answering questions without access to report text ...\n")
+            prompt = answer_prompt_template(q["question"], q["choices"], report=None)
 
         else:
-            report_text = None
-            print(f"[INFO] Answering questions without access to report text ...\n")
-            
-        prompt = answer_prompt_template(q["question"], q["choices"], report=report_text)
-        print(prompt)
+            idx = str(q["task_id"])
+            print(f"[INFO] Accessing report text for question from report {idx} ...\n")
+            report_text = reports_dict.get(idx)
+            print(f"[INFO] Answering questions with access to report text ...\n")            
+            prompt = answer_prompt_template(q["question"], q["choices"], report=report_text)
+            print(prompt)
 
         try:
             response = llm.run(prompt, json_output=True)
             results.append({
-                "report_id": q["report_id"],
+                "task_id": q["task_id"],
                 "question": q["question"],
                 "question_source": q["question_source"],
                 "choices": q["choices"],
@@ -414,9 +437,9 @@ def respond_question(
                 "report_source": report_type
             })
         except Exception as e:
-            print(f"[Error] report {q['report_id']} - {e}")
+            print(f"[Error] report {q['task_id']} - {e}")
             results.append({
-                "report_id": q["report_id"],
+                "task_id": q["task_id"],
                 "question": q["question"],
                 "question_source": q["question_source"],
                 "choices": q["choices"],
