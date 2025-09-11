@@ -81,7 +81,7 @@ generate_questions(
     output_path=out
     )
 
-# Load Discovera generated reports that were created used using gpt-5-nano
+# Load LLM generated reports that were created used using gpt-5
 
 reports_llm = load_reports(
     benchmark_data_path,  
