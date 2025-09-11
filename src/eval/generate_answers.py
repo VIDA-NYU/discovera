@@ -1,13 +1,12 @@
 """
-Script to generate question responses based on benchmark reports.
-Supports multiple report sources such as Ground Truth (GT) and Discovera (gpt-4o).
-
+Script to generate answers based on benchmark reports.
+Supports multiple report sources such as Ground Truth (GT), Discovera (gpt-4o), et
 """
 
 import pandas as pd
 import sys
 import os
-module_dir = "../"  # adjust relative path
+module_dir = "../../"  # adjust relative path
 sys.path.append(os.path.abspath(module_dir))
 from src.eval. prompting import *
 
@@ -15,9 +14,9 @@ from src.eval. prompting import *
 # Configuration
 # ---------------------------
 GROUND_TRUTH = "groundtruth"  # Column name for GT reports
-GENERATED_REPORT = "discovera(gpt-4o)"  # Column name for generated reports
-MODEL = "gpt-5"  # OpenAI model to use
-PROVIDER = "openai"  # Model provider
+GENERATED_REPORT = "discovera(gpt-4o)"  # Source of generated reports
+MODEL = "gpt-5"  # OpenAI model to use to answer questions
+PROVIDER = "openai"  # Model provider used to answer questions
 MAX_QUESTIONS = 10  # Maximum number of questions to process
 BENCHMARK_PATH = "../data/benchmark/benchmark.csv"  # Path to benchmark CSV
 
@@ -62,12 +61,12 @@ def generate_responses(questions: list[dict], report_column: str, output_path: s
 # Load questions
 # ---------------------------
 
-# Load GT and generated report questions
+# Load questions generated GT and Discovera reports
 questions_gt = load_questions(MAX_QUESTIONS, GROUND_TRUTH, PROVIDER, MODEL)
-questions_generated = load_questions(MAX_QUESTIONS, GENERATED_REPORT, PROVIDER, MODEL)
+questions_discovera = load_questions(MAX_QUESTIONS, GENERATED_REPORT, PROVIDER, MODEL)
 
 # Combine all questions
-all_questions = questions_gt + questions_generated
+all_questions = questions_gt + questions_discovera
 
 
 # ---------------------------

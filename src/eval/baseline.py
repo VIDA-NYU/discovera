@@ -101,6 +101,7 @@ def upload_files_with_retry(client, vector_store_id, files):
         else:
             print(f"Failed to upload {f_path} after {MAX_RETRIES} attempts")
 
+
 def query_llm(client, instructions, input_text, vector_store_id, model_name):
     """
     Query the LLM using the specified model, instructions, and input text.
@@ -119,9 +120,10 @@ def query_llm(client, instructions, input_text, vector_store_id, model_name):
     """
     try:
         tools = [
-            {"type": "web_search"},
+        #    {"type": "web_search"},
             {"type": "code_interpreter", "container": {"type": "auto"}}
         ]
+
         if vector_store_id:
             tools.insert(0, {"type": "file_search", "vector_store_ids": [vector_store_id]})
 
@@ -156,7 +158,7 @@ def main():
     # Initialize OpenAI client
     client = OpenAI(api_key=load_openai_key(beaker_conf_path="../.beaker.conf"))
     data_path = "../data/benchmark/"
-    instructions = "You are Biomedical Researcher."
+    instructions = "You are a Biomedical Researcher."
     model_name = "gpt-4o" #"gpt-5"
     output_rows = []
 

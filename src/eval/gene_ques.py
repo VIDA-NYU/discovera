@@ -18,7 +18,7 @@ import sys
 import os
 
 # Add project root to Python path so local modules can be imported
-module_dir = "../"  # relative path to project root (adjust if needed)
+module_dir = "../../"  # relative path to project root (adjust if needed)
 sys.path.append(os.path.abspath(module_dir))
 
 # Import required functions and templates from evaluation module
