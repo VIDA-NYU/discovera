@@ -327,6 +327,52 @@ def _resolve_path_from_id(file_id: str | None) -> str | None:
     return None
 
 
+# =========================
+# Output limiting helpers
+# =========================
+MAX_ROWS_DEFAULT = int(os.environ.get("MCP_MAX_ROWS", "200"))
+MAX_CELL_CHARS_DEFAULT = int(os.environ.get("MCP_MAX_CELL_CHARS", "240"))
+MAX_IDS_PER_YEAR = int(os.environ.get("MCP_MAX_IDS_PER_YEAR", "5"))
+STORAGE_MAX_BYTES_DEFAULT = int(os.environ.get("MCP_STORAGE_MAX_BYTES", "65536"))
+
+
+def _truncate_string(value: Any, max_chars: int) -> Any:
+    try:
+        if isinstance(value, str) and len(value) > max_chars:
+            return value[: max_chars - 1] + "\u2026"
+        return value
+    except Exception:
+        return value
+
+
+def _limit_dataframe_rows(
+    df: pd.DataFrame, max_rows: int | None = None
+) -> pd.DataFrame:
+    try:
+        n = int(max_rows or MAX_ROWS_DEFAULT)
+        if len(df) <= n:
+            return df
+        return df.head(n)
+    except Exception:
+        return df
+
+
+def _truncate_dataframe_columns(
+    df: pd.DataFrame,
+    columns: list[str] | None = None,
+    max_chars: int | None = None,
+) -> pd.DataFrame:
+    try:
+        limit = int(max_chars or MAX_CELL_CHARS_DEFAULT)
+        target_cols = columns or [c for c in df.columns if df[c].dtype == object]
+        for c in target_cols:
+            if c in df.columns:
+                df[c] = df[c].apply(lambda v: _truncate_string(v, limit))
+        return df
+    except Exception:
+        return df
+
+
 def create_server():
     mcp = FastMCP(
         name="discovera_fastmcp",
@@ -481,6 +527,12 @@ def create_server():
                 drop=True
             )
 
+            # Truncate verbose text fields and cap rows defensively
+            final_df = _truncate_dataframe_columns(
+                final_df, ["text"], MAX_CELL_CHARS_DEFAULT
+            )
+            final_df = _limit_dataframe_rows(final_df, MAX_ROWS_DEFAULT)
+
             return final_df.to_dict()
         else:
             return {}
@@ -535,7 +587,7 @@ def create_server():
 
         # Group by the specified columns and count the occurrences
         grouped_df = edges_df.groupby(group_columns).size().reset_index(name="count")
-
+        grouped_df = _limit_dataframe_rows(grouped_df, MAX_ROWS_DEFAULT)
         return grouped_df.to_dict()
 
     @mcp.tool()
@@ -852,6 +904,11 @@ def create_server():
         df = enrich_query(
             params.genes, first=params.first, max_records=params.max_records
         )
+        # Limit rows and truncate verbose columns
+        df = _truncate_dataframe_columns(
+            df, ["genes", "term", "source"], MAX_CELL_CHARS_DEFAULT
+        )
+        df = _limit_dataframe_rows(df, MAX_ROWS_DEFAULT)
         logger.info("🛠️[enrich_rumma] Enrichment fetched successfully")
         return df.to_dict()
 
@@ -889,6 +946,13 @@ def create_server():
         merged = articles.merge(sets_art, how="left", on="pmcid")
         # Preserve original order
         merged = merged.set_index("pmcid").loc[articles["pmcid"]].reset_index()
+        # Truncate long text fields and cap rows
+        merged = _truncate_dataframe_columns(
+            merged,
+            columns=["title", "journal", "authors", "abstract", "gene_sets"],
+            max_chars=MAX_CELL_CHARS_DEFAULT,
+        )
+        merged = _limit_dataframe_rows(merged, MAX_ROWS_DEFAULT)
         logger.info("🛠️[query_string_rumm] Query string fetched successfully")
         return merged.to_dict()
 
@@ -913,6 +977,8 @@ def create_server():
             return {}
         df["pmcid"] = df["term"].str.extract(r"(PMC\d+)")
         df["term"] = df["term"].str.replace(r"PMC\d+-?", "", regex=True)
+        df = _truncate_dataframe_columns(df, ["term", "pmcid"], MAX_CELL_CHARS_DEFAULT)
+        df = _limit_dataframe_rows(df, MAX_ROWS_DEFAULT)
         logger.info("🛠️[query_table_rumm] Query table fetched successfully")
         return df.to_dict()
 
@@ -933,6 +999,10 @@ def create_server():
         )
 
         df = genes_query(params.gene_set_id)
+        df = _truncate_dataframe_columns(
+            df, ["symbol", "name", "summary"], MAX_CELL_CHARS_DEFAULT
+        )
+        df = _limit_dataframe_rows(df, MAX_ROWS_DEFAULT)
         logger.info("🛠️[sets_info_rumm] Sets info fetched successfully")
         return df.to_dict()
 
@@ -965,6 +1035,21 @@ def create_server():
             email=params.email,
             batch_size=params.batch_size,
         )
+        # Compress the year_to_ids to reduce token size: keep counts and sample up to N IDs per year
+        compressed: Dict[str, Any] = {}
+        try:
+            for year, ids in (year_to_ids or {}).items():
+                try:
+                    ids_list = list(ids) if not isinstance(ids, list) else ids
+                except Exception:
+                    ids_list = []
+                compressed[str(year)] = {
+                    "count": len(ids_list),
+                    "sample_ids": ids_list[:MAX_IDS_PER_YEAR],
+                }
+        except Exception:
+            compressed = {}
+
         # Register the saved plot if present
         try:
             if save_path and os.path.exists(save_path):
@@ -978,7 +1063,7 @@ def create_server():
         except Exception:
             pass
         logger.info("🛠️[literature_trends] Literature trends fetched successfully")
-        return {"year_to_ids": year_to_ids or {}, "image_path": save_path}
+        return {"year_to_ids": compressed, "image_path": save_path}
 
     @mcp.tool()
     async def prioritize_genes(
@@ -1006,6 +1091,10 @@ def create_server():
 
         email = params.email or "test@example.com"
         df = prioritize_genes_fn(params.gene_list, params.context_term, email=email)
+        df = _truncate_dataframe_columns(
+            df, ["gene", "evidence", "pmids"], MAX_CELL_CHARS_DEFAULT
+        )
+        df = _limit_dataframe_rows(df, MAX_ROWS_DEFAULT)
         logger.info("🛠️[prioritize_genes] Prioritized genes fetched successfully")
         return df.to_dict()
 
@@ -1025,6 +1114,10 @@ def create_server():
 
         parsed = [g.strip() for g in params.gene_list if g.strip()]
         df = fetch_gene_annota(parsed)
+        df = _truncate_dataframe_columns(
+            df, ["symbol", "name", "summary", "aliases"], MAX_CELL_CHARS_DEFAULT
+        )
+        df = _limit_dataframe_rows(df, MAX_ROWS_DEFAULT)
 
         logger.info("🛠️[gene_info] Gene info fetched successfully")
         return df.to_dict()
@@ -1096,7 +1189,11 @@ def create_server():
                     _read_file_content(
                         e,
                         with_content=True,
-                        max_bytes=int(params.max_bytes or 1048576),
+                        max_bytes=int(
+                            params.max_bytes
+                            if params.max_bytes is not None
+                            else STORAGE_MAX_BYTES_DEFAULT
+                        ),
                     )
                     for e in filtered
                 ]
@@ -1147,7 +1244,13 @@ def create_server():
             if params.with_content:
                 logger.info("🛠️[storage_get] Reading content for %s", entry["path"])
                 content = _read_file_content(
-                    entry, with_content=True, max_bytes=int(params.max_bytes or 1048576)
+                    entry,
+                    with_content=True,
+                    max_bytes=int(
+                        params.max_bytes
+                        if params.max_bytes is not None
+                        else STORAGE_MAX_BYTES_DEFAULT
+                    ),
                 )
                 logger.info("🛠️[storage_get] Content read successfully")
                 return content

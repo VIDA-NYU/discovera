@@ -175,6 +175,7 @@ def map_to_symbol(df, gene_col):
                 results.append(df_chunk)
             if pause_between_chunks_s > 0:
                 time.sleep(pause_between_chunks_s)
+            print(f"[map_to_symbol] Processed {len(results)} chunks")
 
     if results:
         mapping = pd.concat(results, ignore_index=True)
