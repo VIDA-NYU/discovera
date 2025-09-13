@@ -1139,7 +1139,7 @@ def create_server():
         max_bytes: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        List stored files with optional filters and optional content preview.
+        List stored files on MCP server with optional filters and optional content preview.
 
         Args:
             origin_tool (Optional[str]): Filter by originating tool name.
@@ -1174,6 +1174,42 @@ def create_server():
             )
 
             entries = _load_storage_index()
+            # Delete files older than 24 hours and prune them from index
+            try:
+                from datetime import timedelta
+
+                cutoff = datetime.now() - timedelta(hours=24)
+                kept_entries: list[dict] = []
+                for e in entries:
+                    is_old = False
+                    try:
+                        created_at = e.get("created_at")
+                        if created_at:
+                            created_dt = datetime.fromisoformat(str(created_at))
+                            is_old = created_dt < cutoff
+                        else:
+                            mtime = e.get("mtime")
+                            if mtime is not None:
+                                is_old = datetime.fromtimestamp(float(mtime)) < cutoff
+                    except Exception:
+                        is_old = False
+
+                    if is_old:
+                        path = e.get("path")
+                        try:
+                            if path and os.path.exists(path):
+                                os.remove(path)
+                        except Exception:
+                            pass
+                        # Do not keep this entry
+                        continue
+                    kept_entries.append(e)
+                if len(kept_entries) != len(entries):
+                    _save_storage_index(kept_entries)
+                entries = kept_entries
+            except Exception:
+                # best effort cleanup
+                pass
             filtered = _filter_entries(
                 entries,
                 origin_tool=params.origin_tool,
@@ -1197,10 +1233,23 @@ def create_server():
                     )
                     for e in filtered
                 ]
+                # Prune heavy metadata from response
+                for item in enriched:
+                    try:
+                        if "metadata" in item:
+                            del item["metadata"]
+                    except Exception:
+                        pass
                 logger.info("🛠️[storage_list] %d enriched files found", len(enriched))
                 return {"items": enriched}
-            logger.info("🛠️[storage_list] %d files found", len(filtered))
-            return {"items": filtered}
+            # Prune heavy metadata from response
+            pruned = []
+            for e in filtered:
+                d = dict(e)
+                d.pop("metadata", None)
+                pruned.append(d)
+            logger.info("🛠️[storage_list] %d files found", len(pruned))
+            return {"items": pruned}
         except Exception as e:
             return _exception_payload("storage_list", e, {})
 
@@ -1211,7 +1260,7 @@ def create_server():
         max_bytes: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        Retrieve a stored file entry by id; optionally include its content.
+        Retrieve a stored file entry by id on MCP server; optionally include its content.
 
         Args:
             id (str): Storage entry id.
@@ -1275,7 +1324,7 @@ def create_server():
         Exactly one of csv_text, csv_base64, csv_path, csv_url must be provided.
 
         Args:
-            name (Optional[str]): Logical name for the CSV; used to derive filename.
+            name (str): Logical name for the CSV; used to derive filename.
             csv_text (Optional[str]): CSV content as text.
             csv_base64 (Optional[str]): CSV content as base64 (UTF-8 text expected).
             csv_path (Optional[str]): Absolute path to a local CSV file.
@@ -1372,9 +1421,8 @@ def create_server():
             base_dir = os.path.join("output", "user_csvs")
             _ensure_dir(base_dir)
 
-            # Build filename
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"user_input_{timestamp}.csv"
+            # Build unique filename
+            filename = f"{params.name}.csv"
             abs_path = os.path.join(base_dir, filename)
 
             # Persist normalized CSV text
@@ -1408,7 +1456,7 @@ def create_server():
         n_rows: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        Read a stored CSV by id and return a preview of rows.
+        Read a stored CSV by id on MCP server and return a preview of rows.
 
         Args:
             id (str): Storage id of the CSV.

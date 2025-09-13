@@ -310,8 +310,7 @@ If true, include content (text or base64) up to max_bytes in the response.
 
 
 class CsvRecordInput(BaseModel):
-    name: Optional[str] = Field(
-        default=None,
+    name: str = Field(
         description="""
 Logical name for the CSV (used to derive filename). If omitted, timestamped name is used.
 """,
