@@ -5,8 +5,12 @@ import os
 import mygene
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import pickle
+import functools
+import warnings
 
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 # =========================
@@ -105,68 +109,141 @@ def plot_gsea_results(
         print(f"Plot saved: {outpath}")
     # plt.show()
     return fig
+
 # =========================
 # Analysis functions
 # =========================
 
+@functools.lru_cache(maxsize=1)
+def get_valid_hgnc_symbols():
+    """
+    Download HGNC reference table and cache it for validation.
+    """
+    url = "https://storage.googleapis.com/public-download-files/hgnc/tsv/tsv/hgnc_complete_set.txt"
+    hgnc_df = pd.read_csv(url, sep="\t", low_memory=False)
+    return set(hgnc_df["symbol"].dropna().str.upper())
+
 
 def detect_id_type(ids):
-    """Quick heuristic — mainly for info, not strict enforcement."""
-    sample = list(map(str, ids[:10]))
-    if any(x.startswith(("ENSG", "ENSMUSG", "ENST", "ENSMUST", "ENSP", "ENSMUSP")) for x in sample):
-        return "ensembl.gene"
-    elif all(x.isdigit() for x in sample):
-        return "entrezgene"
-    elif any(x.startswith(("NM_", "NR_")) for x in sample):
-        return "refseq"
-    elif any(re.match(r"^[OPQ][0-9][A-Z0-9]{3,}", x) for x in sample):
-        return "uniprot"
-    else:
-        return "symbol"
+    """
+    Heuristic for gene ID type detection.
+    Returns one of:
+      - "ensembl.gene.human"
+      - "ensembl.transcript.human"
+      - "ensembl.protein.human"
+      - "ensembl.gene.mouse"
+      - "ensembl.transcript.mouse"
+      - "ensembl.protein.mouse"
+      - "entrezgene"
+      - "refseq.human"
+      - "refseq.mouse"
+      - "uniprot"
+      - "symbol"
+      - "mixed" (if inconsistent)
+    """
+    sample = list(map(str, ids[:20]))  # check first 20 IDs
+
+    patterns = {
+        "ensembl.gene.human": re.compile(r"^ENSG\d+"),
+        "ensembl.transcript.human": re.compile(r"^ENST\d+"),
+        "ensembl.protein.human": re.compile(r"^ENSP\d+"),
+
+        "ensembl.gene.mouse": re.compile(r"^ENSMUSG\d+"),
+        "ensembl.transcript.mouse": re.compile(r"^ENSMUST\d+"),
+        "ensembl.protein.mouse": re.compile(r"^ENSMUSP\d+"),
+
+        "entrezgene": re.compile(r"^\d+$"),
+
+        "refseq.human": re.compile(r"^(NM_|NR_)\d+"),
+        "refseq.mouse": re.compile(r"^(XM_|XR_)\d+"),
+
+        "uniprot": re.compile(r"^[A-NR-Z][0-9][A-Z0-9]{3,}")  # broad UniProt
+    }
+
+    matched_types = set()
+    for x in sample:
+        for id_type, regex in patterns.items():
+            if regex.match(x):
+                matched_types.add(id_type)
+                break
+        else:
+            matched_types.add("symbol")  # fallback
+
+    return matched_types.pop() if len(matched_types) == 1 else "mixed"
 
 
-def map_to_symbol(df, gene_col):
-    # strip Ensembl version suffix if present
+def map_to_symbol(df, gene_col, cache_file=None):
+    """
+    Map any gene IDs (mouse/human/Ensembl/Entrez/symbol) to human gene symbols.
+    """
     df[gene_col] = df[gene_col].astype(str).str.replace(r"\.\d+$", "", regex=True)
     ids = df[gene_col].dropna().astype(str).tolist()
-
-    # Instead of detecting a single type, allow mixed IDs
-    possible_scopes = ["ensembl.gene", "entrezgene", "refseq", "uniprot", "symbol"]
-
-    # Deduplicate to reduce API load
-    unique_ids = list(pd.unique(ids))
-    if not unique_ids:
+    if not ids:
         return df.assign(symbol=pd.NA)
 
-    # Chunking and parallel querying
-    chunk_size = int(os.environ.get("MYGENE_CHUNK_SIZE", "1000"))
-    max_workers = int(os.environ.get("MYGENE_WORKERS", "4"))
-    pause_between_chunks_s = float(os.environ.get("MYGENE_THROTTLE_SECONDS", "0.0"))
+    unique_ids = list(pd.unique(ids))
+    possible_scopes = ["ensembl.gene", "entrezgene", "refseq", "uniprot", "symbol"]
 
-    def chunks(lst, n):
-        for i in range(0, len(lst), n):
-            yield lst[i: i + n]
+    chunk_size = int(os.environ.get("MYGENE_CHUNK_SIZE", "2000"))
+    max_workers = int(os.environ.get("MYGENE_WORKERS", "8"))
+    pause_between_chunks_s = float(os.environ.get("MYGENE_THROTTLE_SECONDS", "0.1"))
 
     mg = mygene.MyGeneInfo()
 
+    # Load cache if provided
+    cache = {}
+    if cache_file:
+        try:
+            with open(cache_file, "rb") as f:
+                cache = pickle.load(f)
+        except FileNotFoundError:
+            pass
+
+    def chunks(lst, n):
+        for i in range(0, len(lst), n):
+            yield lst[i:i + n]
+
     def fetch_chunk(id_chunk):
+        results = []
+        id_type = detect_id_type(id_chunk)
+
+        if "mouse" in id_type:
+            species = "mouse"
+            fields = "symbol,homologene"
+        else:
+            species = "human"
+            fields = "symbol"
+
         try:
             res = mg.querymany(
                 id_chunk,
                 scopes=possible_scopes,
-                fields="symbol",
-                as_dataframe=True,
-            )
-            # Ensure DataFrame with 'query' as a column
-            res = res.reset_index() if hasattr(res, "reset_index") else pd.DataFrame()
-            return res
-        except Exception:
-            return pd.DataFrame(columns=["query", "symbol"])  # fail-soft
+                fields=fields,
+                species=species,
+                as_dataframe=True
+            ).reset_index()
 
+            for _, row in res.iterrows():
+                human_symbol = None
+                if species == "mouse":
+                    if "homologene" in row and isinstance(row["homologene"], dict):
+                        for taxid, entrez, symbol in row["homologene"].get("genes", []):
+                            if taxid == 9606:
+                                human_symbol = symbol
+                                break
+                if human_symbol is None:
+                    human_symbol = row.get("symbol")
+                results.append({"query": row["query"], "human_symbol": human_symbol})
+
+        except Exception:
+            for gid in id_chunk:
+                results.append({"query": gid, "human_symbol": None})
+
+        return pd.DataFrame(results)
+
+    # Parallel querying
     results = []
     id_chunks = list(chunks(unique_ids, chunk_size))
-
-    # Use a small pool to avoid rate limits; throttle between completions if requested
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_idx = {executor.submit(fetch_chunk, c): idx for idx, c in enumerate(id_chunks)}
         for future in as_completed(future_to_idx):
@@ -176,19 +253,54 @@ def map_to_symbol(df, gene_col):
             if pause_between_chunks_s > 0:
                 time.sleep(pause_between_chunks_s)
 
+    # Combine results
     if results:
         mapping = pd.concat(results, ignore_index=True)
     else:
-        mapping = pd.DataFrame(columns=["query", "symbol"])
+        mapping = pd.DataFrame(columns=["query", "human_symbol"])
 
-    # keep only useful mappings
-    if not mapping.empty:
-        mapping = mapping[["query", "symbol"]].dropna().drop_duplicates()
+    # Merge with cache
+    if cache:
+        cached_df = pd.DataFrame([{"query": k, "human_symbol": v} for k, v in cache.items()])
+        mapping = pd.concat([mapping, cached_df], ignore_index=True).drop_duplicates(subset="query")
 
-    # merge back with df
-    df_merged = df.merge(mapping, left_on=gene_col, right_on="query", how="left")
+    # Update cache
+    if cache_file:
+        cache_dict = dict(zip(mapping["query"], mapping["human_symbol"]))
+        with open(cache_file, "wb") as f:
+            pickle.dump(cache_dict, f)
+
+    # Merge back with original DataFrame
+    df_merged = df.merge(mapping, left_on=gene_col, right_on="query", how="left").drop(columns=["query"])
+    df_merged.rename(columns={"human_symbol": "symbol"}, inplace=True)
+    df_merged["symbol"] = df_merged["symbol"].str.upper()
 
     return df_merged
+
+def prepare_gene_symbols(df, gene_col):
+    """
+    Map to human gene symbols only if necessary; otherwise, keep original symbols.
+    Filters against HGNC to keep valid human symbols.
+    """
+    valid_symbols = get_valid_hgnc_symbols()
+
+    # Check if input is already valid human symbols
+    input_ids = df[gene_col].dropna().astype(str).str.upper()
+    n_valid = input_ids.isin(valid_symbols).sum()
+    fraction_valid = n_valid / len(input_ids)
+    if fraction_valid >= 0.9:  # if most IDs are valid human symbols, skip mapping
+        df = df.copy()
+        df["symbol"] = input_ids
+        print(f"Skipping mapping: {n_valid}/{len(input_ids)} IDs are valid human symbols.")
+    else:
+        df = map_to_symbol(df, gene_col)
+        print(f"Mapping performed: {len(df)} IDs mapped to human symbols.")
+
+    # Filter against HGNC
+    df = df[df["symbol"].isin(valid_symbols)].copy()
+    df = df.drop(columns=[gene_col], errors='ignore')
+    df[gene_col] = df["symbol"]
+    return df
 
 
 def rank_gsea(dataset, gene_sets, hit_col, corr_col,
@@ -196,16 +308,19 @@ def rank_gsea(dataset, gene_sets, hit_col, corr_col,
     if timestamp is None:
         timestamp = get_timestamp()
 
-    # --- Auto-detect and map IDs if not symbols ---
-    sample = dataset[hit_col].dropna().astype(str).tolist()
-    id_type = detect_id_type(sample)
-    if id_type != "symbol":
-        print(f"Converting {id_type} IDs to gene symbols...")
-        dataset = map_to_symbol(dataset, gene_col=hit_col)
-        hit_col = "symbol"  # mapped column
+    # Detect ID type
+    id_type = detect_id_type(dataset[hit_col].dropna().astype(str).tolist())
+    print(f"Detected ID type: {id_type}")
+
+    # Map & filter
+    dataset = prepare_gene_symbols(dataset, hit_col)
+    if dataset.empty:
+        warnings.warn("No valid human symbols found after mapping.")
+        return pd.DataFrame()
 
     data_sorted = dataset.sort_values(by=corr_col, ascending=False).reset_index(drop=True)
     rnk_data = data_sorted[[hit_col, corr_col]].dropna()
+
     # Set index to hit_col
     rnk_data.set_index(hit_col, inplace=True)
 
@@ -223,11 +338,19 @@ def rank_gsea(dataset, gene_sets, hit_col, corr_col,
         return pd.DataFrame()
 
     results_df = pd.DataFrame(results.res2d)
+    print(results_df.head())
     if results_df.empty:
         print("GSEA returned no results.")
         return results_df
+    if len(gene_sets) >= 2:
+        results_df[['Data Base', 'Pathway']] = results_df['Term'].str.split('__', expand=True)
+    else:
+        if isinstance(gene_sets, list):
+            gene_sets = gene_sets[0]  # strip the brackets
 
-    results_df[['Data Base', 'Pathway']] = results_df['Term'].str.split('__', expand=True)
+        results_df['Pathway'] = results_df['Term']
+        results_df['Data Base'] = gene_sets
+
     pval_columns = [col for col in results_df.columns if "p-val" in col or "q-val" in col]
     results_df = results_df[results_df[pval_columns].lt(threshold).any(axis=1)]
 
@@ -247,29 +370,28 @@ def nrank_ora(
     dataset,
     gene_sets,
     gene_col,
-    # organism="human",
     timestamp=None
 ):
     """
     Perform Enrichr enrichment analysis on a gene list.
     Automatically maps Ensembl/Entrez/RefSeq/UniProt IDs to symbols.
+    Invalid human gene symbols are dropped.
     """
     if timestamp is None:
         timestamp = get_timestamp()
 
-    # --- Auto-detect and map IDs ---
-    sample_ids = dataset[gene_col].dropna().astype(str).tolist()
-    id_type = detect_id_type(sample_ids)
-    if id_type != "symbol":
-        print(f"Converting {id_type} IDs to gene symbols...")
-        dataset = map_to_symbol(dataset, gene_col=gene_col)
-        gene_col = "symbol"  # mapped column
-    else:
-        print("Detected input as gene symbols, no conversion needed.")
+    # Detect ID type
+    id_type = detect_id_type(dataset[gene_col].dropna().astype(str).tolist())
+    print(f"Detected ID type: {id_type}")
 
-    # --- Build gene list ---
+    # Map & filter
+    dataset = prepare_gene_symbols(dataset, gene_col)
+
     genes = dataset[gene_col].dropna().astype(str).unique().tolist()
-    print(f"Using {len(genes)} unique genes for ORA")
+
+    if dataset.empty:
+        warnings.warn("No valid human symbols found after mapping.")
+        return pd.DataFrame()
 
     if len(genes) == 0:
         print("No valid genes to run ORA.")
@@ -280,7 +402,6 @@ def nrank_ora(
         enr = gp.enrichr(
             gene_list=genes,
             gene_sets=gene_sets,
-            # organism=organism,
             outdir=None,
             verbose=True
         )
