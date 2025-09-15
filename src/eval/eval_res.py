@@ -1,16 +1,25 @@
 import pandas as pd
-import numpy as np
-
+import os
+from plotnine import (
+    ggplot, aes, geom_histogram, geom_vline, geom_boxplot, geom_jitter,
+    geom_point, geom_abline, geom_text,
+    labs, theme_bw, theme, element_text, scale_fill_manual, scale_y_continuous, scale_x_continuous,
+    scale_color_manual
+)
 from functools import reduce
 
-def load_and_merge_reports(paths, columns_to_rename=None):
+
+def load_and_merge_reports(
+        paths, columns_to_rename=None
+        ):
     """
-    Load multiple JSON report files, rename their columns based on report_source,
-    and merge them into a single DataFrame.
+    Load multiple JSON report files, rename specified columns using the value 
+    in 'report_source', and merge them into a single DataFrame.
 
     Parameters:
     - paths: list of str, paths to JSON files
-    - columns_to_rename: list of column names to rename (default: ['prediction', 'confidence'])
+    - columns_to_rename: list of column names to rename 
+                         (default: ['prediction', 'confidence'])
 
     Returns:
     - Merged pandas DataFrame
@@ -18,57 +27,54 @@ def load_and_merge_reports(paths, columns_to_rename=None):
     
     if columns_to_rename is None:
         columns_to_rename = ['prediction', 'confidence']
-    
+
     def rename_columns_by_report(df):
-        # Determine the suffix based on report_source
-        suffix_map = {
-            "gt": "_usinggt",
-            "llm": "_usingllm"
-        }
-        suffix = "_usingnoreport"  # default
+        if "report_source" not in df.columns:
+            raise ValueError("Missing 'report_source' column in one of the reports")
 
-        for key, val in suffix_map.items():
-            if (df["report_source"] == key).any():
-                suffix = val
-                break
+        # Get the unique report_source value (assume consistent within file)
+        source_val = df["report_source"].iloc[0]
 
-        # Rename specified columns
+        # Rename specified columns with suffix = report_source value
         renamed_columns = {
-            col: f"{col}{suffix}" for col in columns_to_rename if col in df.columns
+            col: f"{col}_{source_val}" for col in columns_to_rename if col in df.columns
         }
 
-        # Drop extra columns if they exist
+        # Drop metadata columns if they exist
         df = df.drop(columns=[c for c in ['report_source', 'choices'] if c in df.columns])
 
         return df.rename(columns=renamed_columns)
 
+    # Process all reports
     dataframes = [rename_columns_by_report(pd.read_json(path)) for path in paths]
 
-    merge_keys = ["report_id", "question", "question_source", "answer"]
+    # Merge on common keys
+    merge_keys = ["task_id", "question", "question_source", "answer"]
     merged = reduce(lambda left, right: left.merge(right, on=merge_keys, how="left"), dataframes)
 
     return merged
 
 
-def calculate_agreement(df, col_gt='prediction_usinggt', col_gen='prediction_usingnoreport'):
+def calculate_agreement(df):
     """
-    Calculate agreement and disagreement percentages at the dataset level,
-    separately for 'gt' and 'llm' question sources.
-    
+    Calculate agreement/disagreement 
+    at dataset and subset levels. Meaning per question.
+    Automatically detect prediction columns and compare the first two found.
     Args:
-        df: pandas DataFrame containing predictions
-        col_gt: column name for predictions using GT
-        col_gen: column name for predictions using generated/LLM
-        
+        df: pandas DataFrame containing at least two columns with 'prediction' in their names.
+
     Returns:
-        Dictionary containing agreement and disagreement percentages overall,
-        and separately for GT and LLM question sources.
+        Dictionary containing agreement/disagreement percentages overall,
+        and separately for GT and generated report questions.
     """
     try:
-        if col_gt not in df.columns or col_gen not in df.columns:
-            raise ValueError(f"Columns '{col_gt}' or '{col_gen}' not found in the DataFrame.")
-        
-        def _compute_agreement(sub_df):
+        # --- Helpers ---
+        def get_suffix(col_name: str) -> str:
+            """Extract suffix after 'prediction_' (e.g., 'gt', 'llm', 'noreport')."""
+            return col_name.split("prediction_")[-1]
+
+        def _compute_agreement(sub_df, col_a, col_b):
+            """Compute agreement stats between two prediction columns."""
             total = len(sub_df)
             if total == 0:
                 return {
@@ -78,125 +84,232 @@ def calculate_agreement(df, col_gt='prediction_usinggt', col_gen='prediction_usi
                     'agreement_percentage': None,
                     'disagreement_percentage': None
                 }
-            agreements = sub_df[col_gt] == sub_df[col_gen]
-            agreement_count = agreements.sum()
+            agreements = sub_df[col_a] == sub_df[col_b]
+            agreement_count = int(agreements.sum())
             disagreement_count = total - agreement_count
             return {
                 'total_questions': total,
-                'agreement_count': int(agreement_count),
-                'disagreement_count': int(disagreement_count),
+                'agreement_count': agreement_count,
+                'disagreement_count': disagreement_count,
                 'agreement_percentage': round((agreement_count / total) * 100, 2),
                 'disagreement_percentage': round((disagreement_count / total) * 100, 2)
             }
-        
-        # Overall agreement
-        overall = _compute_agreement(df)
-        
-        # Agreement for GT questions
-        gt_df = df[df['question_source'] == 'gt']
-        agreement_gt = _compute_agreement(gt_df)
-        
-        # Agreement for LLM questions
-        llm_df = df[df['question_source'] == 'llm']
-        agreement_llm = _compute_agreement(llm_df)
+
+        # --- Find prediction columns ---
+        pred_cols = [col for col in df.columns if "prediction" in col.lower()]
+        if len(pred_cols) < 2:
+            raise ValueError(f"Expected at least two 'prediction' columns, found: {pred_cols}")
+
+        col1, col2 = pred_cols[:2]
+        suffix1, suffix2 = get_suffix(col1), get_suffix(col2)
+
+        # --- Assign GT vs generated report ---
+        if suffix1 in ("gt", "groundtruth"):
+            gt_col, gen_col = col1, col2
+            gt_suffix, gen_suffix = suffix1, suffix2
+        else:
+            gt_col, gen_col = col2, col1
+            gt_suffix, gen_suffix = suffix2, suffix1
+
+        # --- Compute agreements ---
+        overall = _compute_agreement(df, col1, col2)
+        agreement_gt = _compute_agreement(df[df['question_source'] == gt_suffix], gt_col, gen_col)
+        agreement_gen = _compute_agreement(df[df['question_source'] == gen_suffix], gt_col, gen_col)
 
         result = {
+            'columns_compared': (col1, col2),
             'overall': overall,
-            'agreement_gt': agreement_gt,
-            'agreement_llm': agreement_llm
+            f'agreement_{gt_suffix}': agreement_gt,
+            f'agreement_{gen_suffix}': agreement_gen
         }
 
-        # Convert each section into a DataFrame for nicer display
-        overall_df = pd.DataFrame([result['overall']])
-        gt_df = pd.DataFrame([result['agreement_gt']])
-        llm_df = pd.DataFrame([result['agreement_llm']])
+        # --- Pretty printing ---
+        print(f"=== Comparing: {col1} vs {col2} ===\n")
+        print("=== Overall Agreement on Total Questions ===\n")
+        print(pd.DataFrame([overall]), "\n")
         
-        print("=== Overall Agreement ===")
-        print(overall_df, "\n")
+        print(f"=== Agreement on Questions Based on Content from {gt_suffix.upper()} Report ===\n")
+        print(pd.DataFrame([agreement_gt]), "\n")
         
-        print("=== GT Questions (Accuracy) ===")
-        print(gt_df, "\n")
-        
-        print("=== LLM Questions (Recall Proxy) ===")
-        print(llm_df, "\n")
+        print(f"=== Agreement on Questions Generated Based on Content from {gen_suffix.upper()} Report ===\n")
+        print(pd.DataFrame([agreement_gen]), "\n")
         
         return result
-        
+
     except Exception as e:
         print(f"Error calculating dataset agreement: {e}")
         return None
-    
 
-def plot_report_level_agreement(df, output_dir: str):
+
+def agreement_x_analysis(df, output_dir="../output/"):
     """
-    Plot report-level agreement statistics.
+    Generate publication-quality agreement plots using plotnine (ggplot style).
     
     Args:
-        csv_file: Path to the CSV file containing predictions
-        output_dir: Directory to save the plot
-        reference: Reference type ('gt' or 'gen')
+        df: pandas DataFrame with predictions and task_id
+        output_dir: directory to save plots
     """
     try:
-        report_agreements = []
-        
-        # Calculate agreement percentage for each report
-        print(len(df['report_id'].unique()))
-        for report_id in df['report_id'].unique():
-            report_df = df[df['report_id'] == report_id]
-            total = len(report_df)
-            matches = len(report_df[report_df['prediction_usinggt'] == 
-                                  report_df['prediction_usingllm']])
-            agreement_pct = (matches / total) * 100 if total > 0 else 0
-            report_agreements.append(agreement_pct)
-        
-        # Create plot
-        plt.figure(figsize=(10, 6))
-        plt.hist(report_agreements, bins=20, edgecolor='black')
-        plt.xlabel('Agreement Percentage', fontsize=24, fontweight='bold', labelpad=15)
-        plt.ylabel('Number of Reports', fontsize=24, fontweight='bold', labelpad=15)
-        # plt.title(f'Distribution of GT-GEN Agreement Across Reports\n({reference.upper()} Reference)', fontsize=24)
-        plt.xticks(fontsize=22, weight='bold')
-        plt.yticks(fontsize=22, weight='bold')
-        
-        # Add mean and std dev lines
-        mean_agreement = np.mean(report_agreements)
-        print(mean_agreement)
-        std_agreement = np.std(report_agreements)
-        plt.axvline(mean_agreement, color='r', linestyle='dashed', linewidth=2, 
-                   label=f'Mean: {mean_agreement:.1f}%')
-        plt.axvline(mean_agreement + std_agreement, color='g', linestyle=':', linewidth=2,
-                   label=f'SD: {std_agreement:.1f}%')
-        plt.axvline(mean_agreement - std_agreement, color='g', linestyle=':', linewidth=2)
-        
-        plt.legend(fontsize=24, prop={'weight': 'bold', 'size': 16})
-        plt.grid(True, alpha=0.3)
-        
-        # Save plot
-        plot_file = os.path.join(output_dir, f'mcq_eval_report_level_agreement_hist.png')
-        plt.savefig(plot_file, dpi=600, bbox_inches='tight')
-        plt.show()
-        plt.close()
-        
-        # Save report-level statistics
-        report_stats = pd.DataFrame({
-            'Report_ID': df['report_id'].unique(),
-            'Agreement_Percentage': report_agreements
-        })
-        stats_file = os.path.join(output_dir, f'mcq_eval_report_level_stats.csv')
-        report_stats.to_csv(stats_file, index=False)
+        os.makedirs(output_dir, exist_ok=True)
 
-        aggregated_stats_file = os.path.join(output_dir, f'mcq_eval_report_level_stats_aggregated.csv')
-        aggregated_stats = pd.DataFrame({
-            'Mean_Agreement': [mean_agreement],
-            'Std_Deviation': [std_agreement]
+        # --- Detect prediction columns ---
+        pred_cols = [col for col in df.columns if "prediction" in col.lower()]
+        if len(pred_cols) < 2:
+            raise ValueError(f"Expected at least two 'prediction' columns, found: {pred_cols}")
+        col1, col2 = pred_cols[:2]
+
+        # --- Compute overall and disaggregated agreement ---
+        report_agreements = []
+        disaggregated = []
+
+        for task_id in df['task_id'].unique():
+            report_df = df[df['task_id'] == task_id]
+
+            # Overall agreement
+            total_quest = len(report_df)
+            matches = (report_df[col1] == report_df[col2]).sum()
+            overall_pct = (matches / total_quest) * 100 if total_quest > 0 else 0
+            report_agreements.append({"Task_ID": task_id, "Agreement_Percentage": overall_pct})
+
+            # Disaggregated by question_source
+            for source, sub_df in report_df.groupby("question_source"):
+                total_src = len(sub_df)
+                matches_src = (sub_df[col1] == sub_df[col2]).sum()
+                pct_src = (matches_src / total_src) * 100 if total_src > 0 else 0
+                disaggregated.append({
+                    "Task_ID": task_id,
+                    "Question_Source": source,
+                    "Agreement_Percentage": pct_src
+                })
+
+        overall_df = pd.DataFrame(report_agreements)
+        disagg_df = pd.DataFrame(disaggregated)
+
+        # --- Plot 1: Overall histogram ---
+        mean_overall = overall_df["Agreement_Percentage"].mean()
+        std_overall = overall_df["Agreement_Percentage"].std()
+
+        vlines_df = pd.DataFrame({
+            "value": [mean_overall, mean_overall+std_overall, mean_overall-std_overall],
+            "type": ["Mean", "Mean ± 1 SD", "Mean ± 1 SD"]  # combine SD lines under one label
         })
-        aggregated_stats.to_csv(aggregated_stats_file, index=False)
-        
-        print(f"\nReport-level statistics:")
-        print(f"Mean agreement: {mean_agreement:.1f}%")
-        print(f"Standard deviation: {std_agreement:.1f}%")
-        print(f"Plot saved to {plot_file}")
-        print(f"Report-level statistics saved to {stats_file}")
-        
+
+        p1 = (
+            ggplot(overall_df, aes(x="Agreement_Percentage")) +
+            geom_histogram(binwidth=5, fill="#999999", color="black", alpha=0.8) +
+            geom_vline(aes(xintercept="value", color="type"), data=vlines_df, linetype="dashed", size=0.6) +
+            scale_color_manual(values={"Mean": "blue", "Mean ± 1 SD": "green"}) +
+            labs(
+                title="Overall Task-Level Agreement",
+                x="Agreement Percentage",
+                y="Number of Tasks",
+                color="Statistics"
+            ) +
+            theme_bw() +
+            theme(
+                figure_size=(8,6),
+                plot_title=element_text(size=16, weight="bold"),
+                axis_title=element_text(size=14, weight="bold"),
+                axis_text=element_text(size=12)
+            )
+        )
+        p1.save(os.path.join(output_dir, "agreement_hist_overall_gg.png"), dpi=600)
+
+        # --- Plot 2: Disaggregated histogram by question_source ---
+        p2 = (
+            ggplot(disagg_df, aes(x="Agreement_Percentage", fill="Question_Source")) +
+            geom_histogram(binwidth=5, position="identity", alpha=0.6, color="black") +
+            scale_fill_manual(values=["#4C72B0", "#55A868"]) +
+            labs(title="Agreement by Question Source", x="Agreement Percentage", y="Number of Reports") +
+            theme_bw() +
+            theme(
+                figure_size=(8,6),
+                plot_title=element_text(size=16, weight="bold"),
+                axis_title=element_text(size=14, weight="bold"),
+                axis_text=element_text(size=12),
+                legend_title=element_text(size=12, weight="bold"),
+                legend_text=element_text(size=12)
+            )
+        )
+        p2.save(os.path.join(output_dir, "agreement_hist_by_source_gg.png"), dpi=600)
+
+        # --- Plot 3: Boxplot by question_source ---
+        p3 = (
+            ggplot(disagg_df, aes(x="Question_Source", y="Agreement_Percentage", fill="Question_Source")) +
+            geom_boxplot(alpha=0.6) +
+            geom_jitter(width=0.2, alpha=0.5, size=2, color="black") +
+            scale_fill_manual(values=["#4C72B0", "#55A868"]) +
+            labs(title="Agreement Distribution by Question Source", x="Question Source", y="Agreement Percentage") +
+            theme_bw() +
+            theme(
+                figure_size=(8,6),
+                plot_title=element_text(size=16, weight="bold"),
+                axis_title=element_text(size=14, weight="bold"),
+                axis_text=element_text(size=12),
+                legend_position="none"
+            )
+        )
+        p3.save(os.path.join(output_dir, "agreement_boxplot_by_source_gg.png"), dpi=600)
+
+
+        # --- Plot 4: Task-level GT vs LLM scatter with annotations using question_source column ---
+        # Identify the unique sources
+        sources = disagg_df['Question_Source'].unique()
+        if len(sources) < 2:
+            raise ValueError(f"Expected at least two question sources, found: {sources}")
+        gt_source = [s for s in sources if 'gt' in s.lower() or 'groundtruth' in s.lower()][0]
+        llm_source = [s for s in sources if s != gt_source][0]
+
+        # Pivot data using these dynamic sources
+        pivot_df = disagg_df.pivot(index='Task_ID', columns='Question_Source', values='Agreement_Percentage').reset_index()
+        pivot_df.columns.name = None
+
+        # Make sure the pivoted columns exist
+        if gt_source not in pivot_df.columns or llm_source not in pivot_df.columns:
+            raise ValueError(f"Pivoted columns not found: {gt_source}, {llm_source}")
+
+        p4 = (
+            ggplot(pivot_df, aes(x=gt_source, y=llm_source, label='Task_ID')) +
+            geom_point(size=3, color="#4C72B0", alpha=0.7) +
+            geom_text(aes(x=gt_source, y=llm_source),
+                    nudge_x=1.5, nudge_y=1.5, size=8, ha='left') +
+            geom_abline(slope=1, intercept=0, linetype='dashed', color='red') +
+            scale_x_continuous(limits=(0, 100)) +
+            scale_y_continuous(limits=(0, 100)) +
+            labs(
+                title=(
+                    f"Task-Level Answer Agreement (%)\n\n"
+                    f"Questions from {gt_source.upper()}\n"
+                    f"vs\n"
+                    f"Questions from {llm_source.upper()}\n"
+                ),
+                x=f"Agreement on Questions from {gt_source.upper()}",
+                y=f"Agreement on Questions from {llm_source.upper()}"
+            ) +
+            theme_bw() +
+            theme(
+                figure_size=(8,8),
+                plot_title=element_text(size=14, weight='bold', hjust=0.5),
+                axis_title=element_text(size=14, weight='bold'),
+                axis_text=element_text(size=12)
+            )
+        )
+        p4.save(os.path.join(output_dir, "task_level_agreement_gt_vs_llm_annotated.png"), dpi=600)
+
+        print(f"GGPlot-style plots saved in {output_dir}")
+
+        # --- Save statistics ---
+        overall_df.to_csv(os.path.join(output_dir, "agreement_report_level.csv"), index=False)
+        disagg_df.to_csv(os.path.join(output_dir, "agreement_report_level_by_source.csv"), index=False)
+
+        aggregated_stats = pd.DataFrame({
+            "Mean_Agreement": [mean_overall],
+            "Std_Deviation": [std_overall]
+        })
+        aggregated_stats.to_csv(os.path.join(output_dir, "agreement_report_level_aggregated.csv"), index=False)
+
+        print(f"Mean agreement: {mean_overall:.1f}%, Std Dev: {std_overall:.1f}%")
+
     except Exception as e:
-        print(f"Error plotting report-level agreement: {e}")
+        print(f"Error generating ggplot-style agreement plots: {e}")
+
