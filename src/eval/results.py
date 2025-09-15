@@ -25,7 +25,7 @@ sys.path.append(os.path.abspath(module_dir))
 # Import functions
 # -----------------------------
 from src.eval.prompting import *
-from src.eval.eval_res import *
+from src.eval.evaluation import *
 
 # -----------------------------
 # Parameters (easily modifiable)
