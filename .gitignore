@@ -14,3 +14,6 @@ output/
 # virtual environment
 .venv/
 .kube/config
+
+# saved data
+*.png
