@@ -365,3 +365,81 @@ ID of a stored CSV entry (required).
 Number of rows to return from the top of the CSV (preview).
 """,
     )
+
+
+class CsvFilterCondition(BaseModel):
+    column: str = Field(description="""
+Column to filter on.
+""")
+    op: str = Field(description="""
+Operator: one of ==, !=, >, >=, <, <=, in, not_in, contains, not_contains, startswith, endswith, isnull, notnull.
+""")
+    value: Optional[Any] = Field(default=None, description="""
+Right-hand value for comparison; for in/not_in provide list.
+""")
+
+
+class CsvFilterInput(BaseModel):
+    csv_id: str = Field(description="""
+ID of a stored CSV entry to filter (required).
+""")
+    conditions: List[CsvFilterCondition] = Field(description="""
+List of filter conditions combined with AND logic.
+""")
+    keep_columns: Optional[List[str]] = Field(default=None, description="""
+Optional subset of columns to keep in the output.
+""")
+    sort_by: Optional[List[str]] = Field(default=None, description="""
+Optional columns to sort by (prefix with '-' for descending).
+""")
+    drop_duplicates: Optional[bool] = Field(default=False, description="""
+Whether to drop duplicate rows after filtering.
+""")
+    name: Optional[str] = Field(default=None, description="""
+Optional logical name for the output CSV; defaults to auto timestamp.
+""")
+
+
+class CsvIntersectInput(BaseModel):
+    left_csv_id: str = Field(description="""
+ID of the left CSV (required).
+""")
+    right_csv_id: str = Field(description="""
+ID of the right CSV (required).
+""")
+    on: str = Field(description="""
+Column name to intersect on (must exist in both CSVs).
+""")
+    left_keep: Optional[List[str]] = Field(default=None, description="""
+Optional columns to keep from left CSV (defaults to all).
+""")
+    right_keep: Optional[List[str]] = Field(default=None, description="""
+Optional columns to keep from right CSV (defaults to none).
+""")
+    distinct: Optional[bool] = Field(default=True, description="""
+Return distinct rows by the join key.
+""")
+    name: Optional[str] = Field(default=None, description="""
+Optional logical name for the output CSV; defaults to auto timestamp.
+""")
+
+
+class CsvSelectInput(BaseModel):
+    csv_id: str = Field(description="""
+ID of a stored CSV entry (required).
+""")
+    columns: Optional[List[str]] = Field(default=None, description="""
+Columns to keep (in order). If omitted, keep all.
+""")
+    rename: Optional[Dict[str, str]] = Field(default=None, description="""
+Optional mapping of old_name -> new_name for renaming.
+""")
+    distinct: Optional[bool] = Field(default=False, description="""
+Whether to drop duplicate rows after selection.
+""")
+    sort_by: Optional[List[str]] = Field(default=None, description="""
+Optional columns to sort by (prefix with '-' for descending).
+""")
+    name: Optional[str] = Field(default=None, description="""
+Optional logical name for the output CSV; defaults to auto timestamp.
+""")

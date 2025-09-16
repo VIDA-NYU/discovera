@@ -30,7 +30,7 @@ pip install -r requirements.txt
 ### Docker
 Build an image (Python 3.11-slim base, runs on port 8000):
 ```bash
-docker build -f Dockerfile.fastmcp -t yourrepo/discovera:fastmcp-amd64 .
+docker build -f src/discovera_fastmcp/Dockerfile.fastmcp -t yourrepo/discovera:fastmcp-amd64 .
 ```
 
 Push:
