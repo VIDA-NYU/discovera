@@ -316,19 +316,51 @@ with st.sidebar.expander("Context", expanded=True):
         try:
             s3 = _get_s3()
             if s3 and S3_BUCKET:
-                # Choose content type
-                if ext == ".csv":
+                # Default upload settings
+                upload_bytes: bytes = raw
+                upload_ext: str = ext
+                # If it's a quoted, tab-delimited TXT, convert to clean CSV (no quotes, comma-separated)
+                if ext == ".txt":
+                    sample = text[:4000] if 'text' in locals() else ""
+                    if "\t" in sample:
+                        rows: List[str] = []
+                        for line in (text.splitlines() if 'text' in locals() else []):
+                            if not line.strip():
+                                continue
+                            cells = line.split("\t")
+                            cleaned_cells: List[str] = []
+                            for cell in cells:
+                                c = (cell or "").strip()
+                                if len(c) >= 2 and c[0] == '"' and c[-1] == '"':
+                                    c = c[1:-1]
+                                cleaned_cells.append(c)
+                            rows.append(",".join(cleaned_cells))
+                        csv_text = "\n".join(rows)
+                        upload_bytes = csv_text.encode("utf-8")
+                        upload_ext = ".csv"
+                        # Update preview to CSV-style preview
+                        try:
+                            lines = [ln for ln in csv_text.splitlines() if ln.strip()][:3]
+                            preview = "\n".join(lines)
+                        except Exception:
+                            pass
+
+                # Choose content type based on final extension
+                if upload_ext == ".csv":
                     content_type = "text/csv"
-                elif ext == ".txt":
+                elif upload_ext == ".txt":
                     content_type = "text/plain"
                 else:
                     content_type = "application/octet-stream"
 
-                s3_key = f"{S3_PREFIX}/{datetime.now().strftime('%Y-%m-%d')}/{sha[:12]}_{safe_name}{ext}"
+                s3_key = (
+                    f"{S3_PREFIX}/{datetime.now().strftime('%Y-%m-%d')}/"
+                    f"{sha[:12]}_{safe_name}{upload_ext}"
+                )
                 put_kwargs = {
                     "Bucket": S3_BUCKET,
                     "Key": s3_key,
-                    "Body": raw,
+                    "Body": upload_bytes,
                     "ContentType": content_type,
                 }
                 s3.put_object(**put_kwargs)
@@ -347,10 +379,26 @@ with st.sidebar.expander("Context", expanded=True):
         if not remote_url:
             return None
 
+        # Decide display name based on final uploaded extension
+        try:
+            display_name = file_obj.name
+            final_ext = upload_ext if 'upload_ext' in locals() and upload_ext else ext
+            if final_ext and final_ext != ext:
+                base_stem = os.path.splitext(os.path.basename(file_obj.name))[0]
+                display_name = f"{base_stem}{final_ext}"
+        except Exception:
+            display_name = file_obj.name
+
         rec = {
             "hash": sha,
-            "name": file_obj.name,
-            "type": (ext[1:] if ext.startswith(".") else ext).lower(),
+            "name": display_name,
+            "type": (
+                (
+                    (upload_ext[1:] if upload_ext.startswith(".") else upload_ext)
+                    if 'upload_ext' in locals() and upload_ext
+                    else (ext[1:] if ext.startswith(".") else ext)
+                ).lower()
+            ),
             "preview": preview,
             "url": remote_url,
         }

@@ -41,6 +41,9 @@ from src.discovera_fastmcp.pydantic import (
     CsvRecordInput,
     CsvReadInput,
     CountEdgesInput,
+    CsvFilterInput,
+    CsvSelectInput,
+    CsvIntersectInput,
 )
 from src.discovera.bkd.gsea import rank_gsea, nrank_ora
 from src.discovera.bkd.query_indra import nodes_batch, normalize_nodes
@@ -64,9 +67,6 @@ logger = logging.getLogger(__name__)
 
 # OpenAI configuration
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-VECTOR_STORE_ID = os.environ.get(
-    "VECTOR_STORE_ID", "vs_68a75bf9ade88191b6f79599ee23b7f2"
-)
 
 # Initialize OpenAI client
 openai_client = OpenAI()
@@ -327,6 +327,100 @@ def _resolve_path_from_id(file_id: str | None) -> str | None:
     return None
 
 
+# =========================
+# CSV helpers
+# =========================
+def _save_dataframe_csv(
+    df: pd.DataFrame,
+    name: str | None,
+    origin_tool: str,
+    tags: list[str] | None = None,
+    metadata: dict | None = None,
+) -> dict:
+    """Save DataFrame to output/user_csvs and register.
+
+    Returns the storage entry dict.
+    """
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_dir = os.path.join("output", "user_csvs")
+        _ensure_dir(base_dir)
+        base_name = name or f"{origin_tool}_{timestamp}"
+        fname = f"{_slugify(base_name)}.csv"
+        abs_path = os.path.join(base_dir, fname)
+        df.to_csv(abs_path, index=False)
+        entry = _register_file(
+            abs_path,
+            category="generated",
+            origin_tool=origin_tool,
+            tags=["csv", "generated"] + (tags or []),
+            metadata=metadata or {},
+        )
+        return entry
+    except Exception as e:
+        raise e
+
+
+def _preview_dataframe(df: pd.DataFrame, n_rows: int | None = None) -> dict:
+    """Return a lightweight preview dict for a DataFrame."""
+    try:
+        n = int(n_rows or 20)
+        head = df.head(n)
+        return {
+            "columns": list(head.columns),
+            "rows": head.to_dict(orient="records"),
+            "total_rows": int(len(df)),
+        }
+    except Exception:
+        return {"columns": [], "rows": [], "total_rows": 0}
+
+
+# =========================
+# Output limiting helpers
+# =========================
+MAX_ROWS_DEFAULT = int(os.environ.get("MCP_MAX_ROWS", "200"))
+MAX_CELL_CHARS_DEFAULT = int(os.environ.get("MCP_MAX_CELL_CHARS", "240"))
+MAX_IDS_PER_YEAR = int(os.environ.get("MCP_MAX_IDS_PER_YEAR", "5"))
+STORAGE_MAX_BYTES_DEFAULT = int(os.environ.get("MCP_STORAGE_MAX_BYTES", "65536"))
+
+
+def _truncate_string(value: Any, max_chars: int) -> Any:
+    try:
+        if isinstance(value, str) and len(value) > max_chars:
+            return value[: max_chars - 1] + "\u2026"
+        return value
+    except Exception:
+        return value
+
+
+def _limit_dataframe_rows(
+    df: pd.DataFrame, max_rows: int | None = None
+) -> pd.DataFrame:
+    try:
+        n = int(max_rows or MAX_ROWS_DEFAULT)
+        if len(df) <= n:
+            return df
+        return df.head(n)
+    except Exception:
+        return df
+
+
+def _truncate_dataframe_columns(
+    df: pd.DataFrame,
+    columns: list[str] | None = None,
+    max_chars: int | None = None,
+) -> pd.DataFrame:
+    try:
+        limit = int(max_chars or MAX_CELL_CHARS_DEFAULT)
+        target_cols = columns or [c for c in df.columns if df[c].dtype == object]
+        for c in target_cols:
+            if c in df.columns:
+                df[c] = df[c].apply(lambda v: _truncate_string(v, limit))
+        return df
+    except Exception:
+        return df
+
+
 def create_server():
     mcp = FastMCP(
         name="discovera_fastmcp",
@@ -384,6 +478,28 @@ def create_server():
             "context": context or {},
         }
 
+    def _apply_sort(df: pd.DataFrame, sort_by: list[str] | None) -> pd.DataFrame:
+        try:
+            if not sort_by:
+                return df
+            by_cols: list[str] = []
+            ascending: list[bool] = []
+            for key in sort_by:
+                if key.startswith("-"):
+                    by_cols.append(key[1:])
+                    ascending.append(False)
+                else:
+                    by_cols.append(key)
+                    ascending.append(True)
+            # Keep only existing columns
+            filtered_cols = [c for c in by_cols if c in df.columns]
+            if not filtered_cols:
+                return df
+            asc_filtered = [ascending[i] for i, c in enumerate(by_cols) if c in filtered_cols]
+            return df.sort_values(by=filtered_cols, ascending=asc_filtered)
+        except Exception:
+            return df
+    
     @mcp.tool()
     async def query_genes(
         genes: List[str],
@@ -481,6 +597,12 @@ def create_server():
                 drop=True
             )
 
+            # Truncate verbose text fields and cap rows defensively
+            final_df = _truncate_dataframe_columns(
+                final_df, ["text"], MAX_CELL_CHARS_DEFAULT
+            )
+            final_df = _limit_dataframe_rows(final_df, MAX_ROWS_DEFAULT)
+
             return final_df.to_dict()
         else:
             return {}
@@ -535,7 +657,7 @@ def create_server():
 
         # Group by the specified columns and count the occurrences
         grouped_df = edges_df.groupby(group_columns).size().reset_index(name="count")
-
+        grouped_df = _limit_dataframe_rows(grouped_df, MAX_ROWS_DEFAULT)
         return grouped_df.to_dict()
 
     @mcp.tool()
@@ -852,6 +974,11 @@ def create_server():
         df = enrich_query(
             params.genes, first=params.first, max_records=params.max_records
         )
+        # Limit rows and truncate verbose columns
+        df = _truncate_dataframe_columns(
+            df, ["genes", "term", "source"], MAX_CELL_CHARS_DEFAULT
+        )
+        df = _limit_dataframe_rows(df, MAX_ROWS_DEFAULT)
         logger.info("🛠️[enrich_rumma] Enrichment fetched successfully")
         return df.to_dict()
 
@@ -889,6 +1016,13 @@ def create_server():
         merged = articles.merge(sets_art, how="left", on="pmcid")
         # Preserve original order
         merged = merged.set_index("pmcid").loc[articles["pmcid"]].reset_index()
+        # Truncate long text fields and cap rows
+        merged = _truncate_dataframe_columns(
+            merged,
+            columns=["title", "journal", "authors", "abstract", "gene_sets"],
+            max_chars=MAX_CELL_CHARS_DEFAULT,
+        )
+        merged = _limit_dataframe_rows(merged, MAX_ROWS_DEFAULT)
         logger.info("🛠️[query_string_rumm] Query string fetched successfully")
         return merged.to_dict()
 
@@ -913,6 +1047,8 @@ def create_server():
             return {}
         df["pmcid"] = df["term"].str.extract(r"(PMC\d+)")
         df["term"] = df["term"].str.replace(r"PMC\d+-?", "", regex=True)
+        df = _truncate_dataframe_columns(df, ["term", "pmcid"], MAX_CELL_CHARS_DEFAULT)
+        df = _limit_dataframe_rows(df, MAX_ROWS_DEFAULT)
         logger.info("🛠️[query_table_rumm] Query table fetched successfully")
         return df.to_dict()
 
@@ -933,6 +1069,10 @@ def create_server():
         )
 
         df = genes_query(params.gene_set_id)
+        df = _truncate_dataframe_columns(
+            df, ["symbol", "name", "summary"], MAX_CELL_CHARS_DEFAULT
+        )
+        df = _limit_dataframe_rows(df, MAX_ROWS_DEFAULT)
         logger.info("🛠️[sets_info_rumm] Sets info fetched successfully")
         return df.to_dict()
 
@@ -965,6 +1105,21 @@ def create_server():
             email=params.email,
             batch_size=params.batch_size,
         )
+        # Compress the year_to_ids to reduce token size: keep counts and sample up to N IDs per year
+        compressed: Dict[str, Any] = {}
+        try:
+            for year, ids in (year_to_ids or {}).items():
+                try:
+                    ids_list = list(ids) if not isinstance(ids, list) else ids
+                except Exception:
+                    ids_list = []
+                compressed[str(year)] = {
+                    "count": len(ids_list),
+                    "sample_ids": ids_list[:MAX_IDS_PER_YEAR],
+                }
+        except Exception:
+            compressed = {}
+
         # Register the saved plot if present
         try:
             if save_path and os.path.exists(save_path):
@@ -978,7 +1133,7 @@ def create_server():
         except Exception:
             pass
         logger.info("🛠️[literature_trends] Literature trends fetched successfully")
-        return {"year_to_ids": year_to_ids or {}, "image_path": save_path}
+        return {"year_to_ids": compressed, "image_path": save_path}
 
     @mcp.tool()
     async def prioritize_genes(
@@ -1005,7 +1160,12 @@ def create_server():
         )
 
         email = params.email or "test@example.com"
-        df = prioritize_genes_fn(params.gene_list, params.context_term, email=email)
+        gene_list_str = ", ".join(params.gene_list)
+        df = prioritize_genes_fn(gene_list_str, params.context_term, email=email)
+        df = _truncate_dataframe_columns(
+            df, ["gene", "evidence", "pmids"], MAX_CELL_CHARS_DEFAULT
+        )
+        df = _limit_dataframe_rows(df, MAX_ROWS_DEFAULT)
         logger.info("🛠️[prioritize_genes] Prioritized genes fetched successfully")
         return df.to_dict()
 
@@ -1025,6 +1185,10 @@ def create_server():
 
         parsed = [g.strip() for g in params.gene_list if g.strip()]
         df = fetch_gene_annota(parsed)
+        df = _truncate_dataframe_columns(
+            df, ["symbol", "name", "summary", "aliases"], MAX_CELL_CHARS_DEFAULT
+        )
+        df = _limit_dataframe_rows(df, MAX_ROWS_DEFAULT)
 
         logger.info("🛠️[gene_info] Gene info fetched successfully")
         return df.to_dict()
@@ -1046,7 +1210,7 @@ def create_server():
         max_bytes: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        List stored files with optional filters and optional content preview.
+        List stored files on MCP server with optional filters and optional content preview.
 
         Args:
             origin_tool (Optional[str]): Filter by originating tool name.
@@ -1081,6 +1245,42 @@ def create_server():
             )
 
             entries = _load_storage_index()
+            # Delete files older than 24 hours and prune them from index
+            try:
+                from datetime import timedelta
+
+                cutoff = datetime.now() - timedelta(hours=24)
+                kept_entries: list[dict] = []
+                for e in entries:
+                    is_old = False
+                    try:
+                        created_at = e.get("created_at")
+                        if created_at:
+                            created_dt = datetime.fromisoformat(str(created_at))
+                            is_old = created_dt < cutoff
+                        else:
+                            mtime = e.get("mtime")
+                            if mtime is not None:
+                                is_old = datetime.fromtimestamp(float(mtime)) < cutoff
+                    except Exception:
+                        is_old = False
+
+                    if is_old:
+                        path = e.get("path")
+                        try:
+                            if path and os.path.exists(path):
+                                os.remove(path)
+                        except Exception:
+                            pass
+                        # Do not keep this entry
+                        continue
+                    kept_entries.append(e)
+                if len(kept_entries) != len(entries):
+                    _save_storage_index(kept_entries)
+                entries = kept_entries
+            except Exception:
+                # best effort cleanup
+                pass
             filtered = _filter_entries(
                 entries,
                 origin_tool=params.origin_tool,
@@ -1096,14 +1296,31 @@ def create_server():
                     _read_file_content(
                         e,
                         with_content=True,
-                        max_bytes=int(params.max_bytes or 1048576),
+                        max_bytes=int(
+                            params.max_bytes
+                            if params.max_bytes is not None
+                            else STORAGE_MAX_BYTES_DEFAULT
+                        ),
                     )
                     for e in filtered
                 ]
+                # Prune heavy metadata from response
+                for item in enriched:
+                    try:
+                        if "metadata" in item:
+                            del item["metadata"]
+                    except Exception:
+                        pass
                 logger.info("🛠️[storage_list] %d enriched files found", len(enriched))
                 return {"items": enriched}
-            logger.info("🛠️[storage_list] %d files found", len(filtered))
-            return {"items": filtered}
+            # Prune heavy metadata from response
+            pruned = []
+            for e in filtered:
+                d = dict(e)
+                d.pop("metadata", None)
+                pruned.append(d)
+            logger.info("🛠️[storage_list] %d files found", len(pruned))
+            return {"items": pruned}
         except Exception as e:
             return _exception_payload("storage_list", e, {})
 
@@ -1114,10 +1331,10 @@ def create_server():
         max_bytes: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        Retrieve a stored file entry by id; optionally include its content.
+        Retrieve a stored file entry by id on MCP server; optionally include its content.
 
         Args:
-            id (str): Storage entry id.
+            id (str): Storage entry id (required).
             with_content (Optional[bool]): If true, include content up to max_bytes.
             max_bytes (Optional[int]): Max bytes to read when including content (default 1 MB).
 
@@ -1147,7 +1364,13 @@ def create_server():
             if params.with_content:
                 logger.info("🛠️[storage_get] Reading content for %s", entry["path"])
                 content = _read_file_content(
-                    entry, with_content=True, max_bytes=int(params.max_bytes or 1048576)
+                    entry,
+                    with_content=True,
+                    max_bytes=int(
+                        params.max_bytes
+                        if params.max_bytes is not None
+                        else STORAGE_MAX_BYTES_DEFAULT
+                    ),
                 )
                 logger.info("🛠️[storage_get] Content read successfully")
                 return content
@@ -1172,7 +1395,7 @@ def create_server():
         Exactly one of csv_text, csv_base64, csv_path, csv_url must be provided.
 
         Args:
-            name (Optional[str]): Logical name for the CSV; used to derive filename.
+            name (str): Logical name for the CSV; used to derive filename (required).
             csv_text (Optional[str]): CSV content as text.
             csv_base64 (Optional[str]): CSV content as base64 (UTF-8 text expected).
             csv_path (Optional[str]): Absolute path to a local CSV file.
@@ -1269,9 +1492,8 @@ def create_server():
             base_dir = os.path.join("output", "user_csvs")
             _ensure_dir(base_dir)
 
-            # Build filename
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"user_input_{timestamp}.csv"
+            # Build unique filename
+            filename = f"{params.name}.csv"
             abs_path = os.path.join(base_dir, filename)
 
             # Persist normalized CSV text
@@ -1305,10 +1527,10 @@ def create_server():
         n_rows: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        Read a stored CSV by id and return a preview of rows.
+        Read a stored CSV by id on MCP server and return a preview of rows.
 
         Args:
-            id (str): Storage id of the CSV.
+            id (str): Storage id of the CSV (required).
             n_rows (Optional[int]): Number of rows to preview. Defaults to 20.
 
         Returns:
@@ -1351,6 +1573,291 @@ def create_server():
                 "csv_read", e, {"id": params.id, "path": params.path}
             )
 
+    @mcp.tool()
+    async def csv_filter(
+        csv_id: str,
+        conditions: List[Dict[str, Any]],
+        keep_columns: Optional[List[str]] = None,
+        sort_by: Optional[List[str]] = None,
+        drop_duplicates: Optional[bool] = None,
+        name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Filter a stored CSV by column conditions with AND logic.
+
+        Args:
+            csv_id (str): Storage id of the input CSV to filter.
+            conditions (List[Dict[str, Any]]): List of filter conditions to apply.
+                Each item accepts keys: {"column", "op", "value"} where:
+                - column (str): Column to filter on.
+                - op (str): One of "==", "!=", ">", ">=", "<", "<=", "in", "not_in",
+                  "contains", "not_contains", "startswith", "endswith", "isnull", "notnull".
+                - value (Any): Comparison value. For "in"/"not_in", provide a list of values.
+            keep_columns (Optional[List[str]]): Optional subset of columns to keep in the output.
+            sort_by (Optional[List[str]]): Optional sort keys. Prefix with '-' for descending
+                (e.g., ["-padj", "log2fc"]). Non-existing columns are ignored.
+            drop_duplicates (Optional[bool]): If true, drops duplicate rows after filtering.
+            name (Optional[str]): Logical name for the output CSV; if not provided an auto name is used.
+
+        Returns:
+            Dict[str, Any]: Preview with keys {"columns", "rows", "total_rows", "storage_entry"}.
+        """
+        try:
+            params = _validate_params(
+                {
+                    "csv_id": csv_id,
+                    "conditions": conditions,
+                    "keep_columns": keep_columns,
+                    "sort_by": sort_by,
+                    "drop_duplicates": drop_duplicates,
+                    "name": name,
+                },
+                CsvFilterInput,
+                "csv_filter",
+            )
+
+            csv_abs_path = _resolve_path_from_id(params.csv_id)
+            if not csv_abs_path:
+                raise ValueError("Provide csv_id")
+            df = pd.read_csv(csv_abs_path)
+
+            mask = pd.Series([True] * len(df))
+            for cond in params.conditions:
+                col = cond.column
+                op = (cond.op or "").lower()
+                val = cond.value
+                if col not in df.columns:
+                    # Non-existent column -> always False for this condition
+                    mask &= False
+                    continue
+                series = df[col]
+                if op == "==":
+                    mask &= series == val
+                elif op == "!=":
+                    mask &= series != val
+                elif op == ">":
+                    mask &= series > val
+                elif op == ">=":
+                    mask &= series >= val
+                elif op == "<":
+                    mask &= series < val
+                elif op == "<=":
+                    mask &= series <= val
+                elif op == "in":
+                    vals = val if isinstance(val, list) else [val]
+                    mask &= series.isin(vals)
+                elif op == "not_in":
+                    vals = val if isinstance(val, list) else [val]
+                    mask &= ~series.isin(vals)
+                elif op == "contains":
+                    mask &= series.astype(str).str.contains(str(val), na=False, case=False)
+                elif op == "not_contains":
+                    mask &= ~series.astype(str).str.contains(str(val), na=False, case=False)
+                elif op == "startswith":
+                    mask &= series.astype(str).str.startswith(str(val), na=False)
+                elif op == "endswith":
+                    mask &= series.astype(str).str.endswith(str(val), na=False)
+                elif op == "isnull":
+                    mask &= series.isna()
+                elif op == "notnull":
+                    mask &= series.notna()
+                else:
+                    raise ValueError(f"Unsupported operator: {cond.op}")
+
+            filtered = df[mask]
+            if params.keep_columns:
+                existing = [c for c in params.keep_columns if c in filtered.columns]
+                if existing:
+                    filtered = filtered[existing]
+            if params.drop_duplicates:
+                filtered = filtered.drop_duplicates()
+            if params.sort_by:
+                filtered = _apply_sort(filtered, params.sort_by)
+
+            entry = _save_dataframe_csv(
+                filtered,
+                params.name,
+                origin_tool="csv_filter",
+                tags=["filter"],
+                metadata={"source_id": params.csv_id},
+            )
+
+            preview = _preview_dataframe(filtered)
+            preview.update({"storage_entry": entry})
+            return preview
+        except Exception as e:
+            return _exception_payload(
+                "csv_filter",
+                e,
+                {
+                    "csv_id": csv_id,
+                },
+            )
+
+    @mcp.tool()
+    async def csv_select(
+        csv_id: str,
+        columns: Optional[List[str]] = None,
+        rename: Optional[Dict[str, str]] = None,
+        distinct: Optional[bool] = None,
+        sort_by: Optional[List[str]] = None,
+        name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Project a stored CSV to a subset of columns, optionally rename, distinct, and sort.
+
+        Args:
+            csv_id (str): Storage id of the input CSV to project.
+            columns (Optional[List[str]]): Ordered list of columns to keep. If omitted, keep all.
+            rename (Optional[Dict[str, str]]): Mapping of old -> new column names to apply.
+            distinct (Optional[bool]): If true, drops duplicate rows after selection.
+            sort_by (Optional[List[str]]): Optional sort keys. Prefix with '-' for descending.
+            name (Optional[str]): Logical name for the output CSV; if not provided an auto name is used.
+
+        Returns:
+            Dict[str, Any]: Preview with keys {"columns", "rows", "total_rows", "storage_entry"}.
+        """
+        try:
+            params = _validate_params(
+                {
+                    "csv_id": csv_id,
+                    "columns": columns,
+                    "rename": rename,
+                    "distinct": distinct,
+                    "sort_by": sort_by,
+                    "name": name,
+                },
+                CsvSelectInput,
+                "csv_select",
+            )
+
+            csv_abs_path = _resolve_path_from_id(params.csv_id)
+            if not csv_abs_path:
+                raise ValueError("Provide csv_id")
+            df = pd.read_csv(csv_abs_path)
+
+            out = df
+            if params.columns:
+                existing = [c for c in params.columns if c in out.columns]
+                out = out[existing]
+            if params.rename:
+                out = out.rename(columns={k: v for k, v in (params.rename or {}).items() if k in out.columns})
+            if params.distinct:
+                out = out.drop_duplicates()
+            if params.sort_by:
+                out = _apply_sort(out, params.sort_by)
+
+            entry = _save_dataframe_csv(
+                out,
+                params.name,
+                origin_tool="csv_select",
+                tags=["select"],
+                metadata={"source_id": params.csv_id},
+            )
+
+            preview = _preview_dataframe(out)
+            preview.update({"storage_entry": entry})
+            return preview
+        except Exception as e:
+            return _exception_payload(
+                "csv_select",
+                e,
+                {
+                    "csv_id": csv_id,
+                },
+            )
+
+    @mcp.tool()
+    async def csv_intersect(
+        left_csv_id: str,
+        right_csv_id: str,
+        on: str,
+        left_keep: Optional[List[str]] = None,
+        right_keep: Optional[List[str]] = None,
+        distinct: Optional[bool] = None,
+        name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Intersect rows by a key column present in both CSVs. Returns rows with keys in both.
+
+        Args:
+            left_csv_id (str): Storage id of the left CSV.
+            right_csv_id (str): Storage id of the right CSV.
+            on (str): Join key column present in both CSVs (e.g., "symbol").
+            left_keep (Optional[List[str]]): Columns to keep from the left CSV (defaults to all).
+            right_keep (Optional[List[str]]): Columns to keep from the right CSV (defaults to none).
+                The join key is always included from both sides appropriately.
+            distinct (Optional[bool]): If true, drop duplicate rows by the join key after merge.
+            name (Optional[str]): Logical name for the output CSV; if not provided an auto name is used.
+
+        Returns:
+            Dict[str, Any]: Preview with keys {"columns", "rows", "total_rows", "storage_entry"}.
+        """
+        try:
+            params = _validate_params(
+                {
+                    "left_csv_id": left_csv_id,
+                    "right_csv_id": right_csv_id,
+                    "on": on,
+                    "left_keep": left_keep,
+                    "right_keep": right_keep,
+                    "distinct": distinct,
+                    "name": name,
+                },
+                CsvIntersectInput,
+                "csv_intersect",
+            )
+
+            left_path = _resolve_path_from_id(params.left_csv_id)
+            right_path = _resolve_path_from_id(params.right_csv_id)
+            if not left_path or not right_path:
+                raise ValueError("Provide left_csv_id and right_csv_id")
+            left_df = pd.read_csv(left_path)
+            right_df = pd.read_csv(right_path)
+
+            if params.on not in left_df.columns or params.on not in right_df.columns:
+                raise ValueError(f"Join key '{params.on}' not found in both CSVs")
+
+            # Keep only relevant columns
+            lcols = params.left_keep or list(left_df.columns)
+            rcols = params.right_keep or []
+            lcols = [c for c in lcols if c in left_df.columns]
+            rcols = [c for c in rcols if c in right_df.columns and c != params.on]
+
+            left_sel = left_df[[c for c in set([params.on] + lcols) if c in left_df.columns]]
+            right_sel = right_df[[c for c in set([params.on] + rcols) if c in right_df.columns]]
+
+            merged = left_sel.merge(right_sel, how="inner", on=params.on, suffixes=("_left", "_right"))
+
+            if params.distinct:
+                merged = merged.drop_duplicates(subset=[params.on])
+
+            entry = _save_dataframe_csv(
+                merged,
+                params.name,
+                origin_tool="csv_intersect",
+                tags=["intersect"],
+                metadata={
+                    "left_source_id": params.left_csv_id,
+                    "right_source_id": params.right_csv_id,
+                    "key": params.on,
+                },
+            )
+
+            preview = _preview_dataframe(merged)
+            preview.update({"storage_entry": entry})
+            return preview
+        except Exception as e:
+            return _exception_payload(
+                "csv_intersect",
+                e,
+                {
+                    "left_csv_id": left_csv_id,
+                    "right_csv_id": right_csv_id,
+                    "on": on,
+                },
+            )
+
     return mcp
 
 
@@ -1362,8 +1869,6 @@ def main():
             "OpenAI API key not found. Please set OPENAI_API_KEY environment variable."
         )
         raise ValueError("OpenAI API key is required")
-
-    logger.info(f"Using vector store: {VECTOR_STORE_ID}")
 
     # Create the MCP server
     server = create_server()
