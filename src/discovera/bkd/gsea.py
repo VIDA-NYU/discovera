@@ -9,6 +9,7 @@ import pickle
 import functools
 import warnings
 
+from gseapy import GSEA
 from pydeseq2.dds import DeseqDataSet
 from pydeseq2.ds import DeseqStats
 from pydeseq2.default_inference import DefaultInference
@@ -305,6 +306,149 @@ def prepare_gene_symbols(df, gene_col):
     df[gene_col] = df["symbol"]
     return df
 
+def fuzzy_rename_column(df, column, reference_values, threshold=50):
+    """
+    Rename values in a DataFrame column to closest matches in reference_values using fuzzy matching.
+
+    Parameters:
+    - df: DataFrame containing the column to rename
+    - column: column name in df to rename
+    - reference_values: list of strings to match against
+    - threshold: minimum fuzzy match score to apply renaming
+
+    Returns:
+    - df with updated column values
+    """
+    new_values = []
+    for val in df[column]:
+        match, score, _ = process.extractOne(val, reference_values)
+        if score >= threshold:
+            new_values.append(match)
+        else:
+            new_values.append(val)  # keep original if no good match
+    df[column] = new_values
+    return df
+
+
+def run_deseq2(raw_counts, sample_conditions, gene_column="Unnamed: 0", 
+               sample_column="SampleID", group_column="Group"):
+    """
+    Full DESeq2 workflow (preprocessing step for downstream GSEA):
+
+    This function performs preprocessing and differential expression analysis 
+    on RNA-seq count data using **DESeq2**, a widely used method for identifying 
+    differentially expressed genes. DESeq2 models raw counts using a negative 
+    binomial distribution and performs statistical testing while accounting 
+    for differences in sequencing depth and biological variability.
+
+    The workflow generates a tidy results table suitable for downstream analyses, 
+    including **Gene Set Enrichment Analysis (GSEA)**.
+
+    Parameters:
+    - raw_counts: pandas DataFrame of raw counts (genes × samples)
+        Expected format:
+            - Rows: genes (e.g., Ensembl IDs or gene symbols)
+            - Columns: sample names
+            - One column (gene_column) contains gene identifiers
+        Dataset after preprocessing:
+            - `filter_counts`: genes × samples matrix of integer counts,
+              retaining genes with at least one sample >10 reads
+    - sample_conditions: pandas DataFrame of sample metadata
+        Expected format:
+            - Column sample_column: sample identifiers (may require fuzzy matching)
+            - Column group_column: experimental group or condition
+        Dataset after processing:
+            - `sample_conditions`: samples × group labels, with sample IDs aligned 
+              to counts columns
+    - gene_column: name of the column in raw_counts with gene identifiers
+    - sample_column: name of the column in sample_conditions with sample IDs
+    - group_column: name of the column in sample_conditions with group labels
+
+    Workflow steps:
+    1. Load counts data and filter low-expressed genes
+       - Filtered counts are stored in `filter_counts` (genes × samples, integer counts)
+    2. Load metadata and align/fuzzy-match sample IDs to counts columns
+       - Metadata is stored in `sample_conditions` (samples × group labels)
+    3. Build DESeq2 dataset (`dds`)
+       - DESeq2 object combines counts and metadata
+       - Performs size factor estimation (normalization), dispersion estimation,
+         and prepares for statistical testing
+    4. Automatically select reference and tested levels for the group factor
+    5. Run DESeq2 statistical testing
+       - Generates Wald statistics and p-values for differential expression
+
+    Returns:
+    - results_df: a **pandas DataFrame** containing DESeq2 results for each gene
+        - One row per gene
+        - Columns include:
+            - 'GeneID': the gene identifier (originally from the counts file)
+            - 'log2FoldChange': estimated log2 fold change of expression between 
+              the tested group and reference group
+            - 'lfcSE': standard error of the log2 fold change
+            - 'stat': Wald test statistic
+            - 'pvalue': raw p-value for differential expression
+            - 'padj': adjusted p-value (Benjamini-Hochberg FDR correction)
+        - Can be **directly used for ranking genes** for GSEA or other enrichment analyses
+        - Index is reset (0..n-1), so 'GeneID' is a regular column, not the index
+
+    Note:
+    - DESeq2 is a robust method for RNA-seq differential expression analysis 
+      that accounts for library size differences and biological variability.
+    - This function is primarily a **preprocessing step** for GSEA. 
+      The output `results_df` can be ranked by log2 fold change or other statistics 
+      for enrichment analysis of gene sets.
+    """
+
+    # raw_counts:
+    #   Rows: genes
+    #   Columns: sample names (e.g., "3_1", "5_2")
+    #   Values: raw read counts
+    raw_counts = raw_counts.set_index(gene_column)
+    raw_counts.index.name = None
+    # Filter lowly-expressed genes
+    filter_counts = raw_counts[(raw_counts > 10).sum(axis=1) > 0]
+
+
+    # sample_conditions:
+    #   Column sample_column: sample IDs (to be matched with counts columns)
+    #   Column group_column: experimental group (e.g., "DMSO", "Cisplatin")
+    sample_conditions = fuzzy_rename_column(sample_conditions, sample_column, list(filter_counts.columns))
+    sample_conditions = sample_conditions[[sample_column, group_column]].set_index(sample_column)
+    sample_conditions[group_column] = pd.Categorical(sample_conditions[group_column])
+
+    # --- Build DESeq2 dataset ---
+    dds = DeseqDataSet(
+        counts=filter_counts.T,            # Transpose: DESeq expects samples as rows
+        metadata=sample_conditions,        # Metadata must match rows of counts
+        design_factors=group_column
+    )
+
+    # --- Run normalization and dispersion estimation ---
+    dds.deseq2()
+
+    # --- Automatically pick reference/tested levels ---
+    group_levels = dds.obs[group_column].unique()
+    reference_level = group_levels[0]
+    tested_level = group_levels[1]
+
+    print(f"Reference level: {reference_level}")
+    print(f"Tested level: {tested_level}")
+
+    # --- Run DESeq2 stats ---
+    contrast = [group_column, tested_level, reference_level]
+    print("Using contrast:", contrast)
+
+    stat_res = DeseqStats(
+        dds,
+        contrast=contrast,
+        inference=DefaultInference(n_cpus=4)
+    )
+    stat_res.summary()
+
+    results = stat_res.results_df.copy()
+    results.index.name = "GeneID"
+    results = results.reset_index()
+    return results
 
 def rank_gsea(dataset, gene_sets, hit_col, corr_col,
               min_size=5, max_size=200, threshold=0.05, timestamp=None):
@@ -362,7 +506,7 @@ def rank_gsea(dataset, gene_sets, hit_col, corr_col,
     save_with_timestamp(results_df, "gsea_results", timestamp)
     print(f"Number of matching results with p-val < {threshold}: {len(results_df)}")
 
-    sorted_results = results_df.sort_values(by="NES", ascending=True)
+    sorted_results = results_df.sort_values(by="NES", ascending=False)
     top_low_nes = sorted_results.head(10)
     top_high_nes = sorted_results.tail(10)
     top_combined = pd.concat([top_high_nes, top_low_nes]).drop_duplicates()
@@ -370,152 +514,102 @@ def rank_gsea(dataset, gene_sets, hit_col, corr_col,
     plot_gsea_results(top_combined, timestamp)
     return sorted_results
 
-def fuzzy_rename_column(df, column, reference_values, threshold=50):
+
+def classic_gsea(dataset, metadata, gene_sets, hit_col, group_column,
+                      pheno_pos, pheno_neg,
+                      permutation_type='gene_set',
+                      permutation_num=1000,
+                      method='signal_to_noise',
+                      threads=4, seed=8,
+                      threshold=0.05):
     """
-    Rename values in a DataFrame column to closest matches in reference_values using fuzzy matching.
+    Run classic GSEA (Gene Set Enrichment Analysis) using raw expression data 
+    (not pre-ranked). This function maps gene identifiers, sets up the expression 
+    matrix, and performs enrichment analysis for the specified phenotypes.
 
     Parameters:
-    - df: DataFrame containing the column to rename
-    - column: column name in df to rename
-    - reference_values: list of strings to match against
-    - threshold: minimum fuzzy match score to apply renaming
+    - dataset: pandas DataFrame containing gene expression data
+        Must include a column with gene identifiers (hit_col) and expression values.
+    - metadata: pandas DataFrame containing sample metadata
+        Must include a column specifying sample groups (group_column)
+    - gene_sets: gene sets for enrichment (e.g., 'MSigDB_Hallmark_2020')
+        Can be a string (for a predefined database) or a list of gene sets.
+    - hit_col: column name in dataset containing gene symbols/IDs
+    - group_column: column name in metadata specifying sample groups
+    - pheno_pos: name of the positive phenotype (e.g., "Cisplatin_IC50")
+    - pheno_neg: name of the negative phenotype (e.g., "DMSO")
+    - permutation_type: 'gene_set' or 'phenotype' (default='gene_set')
+    - permutation_num: number of permutations to perform (default=1000)
+    - method: ranking method for genes, e.g., 'signal_to_noise' (default)
+    - threads: number of CPU threads to use (default=4)
+    - seed: random seed for reproducibility (default=8)
 
     Returns:
-    - df with updated column values
-    """
-    new_values = []
-    for val in df[column]:
-        match, score, _ = process.extractOne(val, reference_values)
-        if score >= threshold:
-            new_values.append(match)
-        else:
-            new_values.append(val)  # keep original if no good match
-    df[column] = new_values
-    return df
-
-def run_deseq2(counts_file, metadata_file, gene_column="Unnamed: 0", 
-               sample_column="SampleID", group_column="Group"):
-    """
-    Full DESeq2 workflow (preprocessing step for downstream GSEA):
-
-    This function performs preprocessing and differential expression analysis 
-    on RNA-seq count data using **DESeq2**, a widely used method for identifying 
-    differentially expressed genes. DESeq2 models raw counts using a negative 
-    binomial distribution and performs statistical testing while accounting 
-    for differences in sequencing depth and biological variability.
-
-    The workflow generates a tidy results table suitable for downstream analyses, 
-    including **Gene Set Enrichment Analysis (GSEA)**.
-
-    Parameters:
-    - counts_file: path to a CSV file containing raw counts
-        Expected format:
-            - Rows: genes (e.g., Ensembl IDs or gene symbols)
-            - Columns: sample names
-            - One column (gene_column) contains gene identifiers
-        Dataset after loading:
-            - `raw_counts`: genes × samples matrix of integer counts
-            - Filtered version (`filter_counts`) retains genes with at least 
-              one sample >10 reads
-    - metadata_file: path to a CSV file containing sample metadata
-        Expected format:
-            - Column sample_column: sample identifiers (may require fuzzy matching)
-            - Column group_column: experimental group or condition
-        Dataset after processing:
-            - `sample_conditions`: samples × group labels, with sample IDs aligned 
-              to counts columns
-    - gene_column: name of the column in counts_file with gene identifiers
-    - sample_column: name of the column in metadata_file with sample IDs
-    - group_column: name of the column in metadata_file with group labels
-
-    Workflow steps:
-    1. Load counts data and filter low-expressed genes
-       - Filtered counts are stored in `filter_counts` (genes × samples, integer counts)
-    2. Load metadata and align/fuzzy-match sample IDs to counts columns
-       - Metadata is stored in `sample_conditions` (samples × group labels)
-    3. Build DESeq2 dataset (`dds`)
-       - DESeq2 object combines counts and metadata
-       - Performs size factor estimation (normalization), dispersion estimation,
-         and prepares for statistical testing
-    4. Automatically select reference and tested levels for the group factor
-    5. Run DESeq2 statistical testing
-       - Generates Wald statistics and p-values for differential expression
-    Returns:
-    - results_df: a **pandas DataFrame** containing DESeq2 results for each gene
-        - One row per gene
-        - Columns include:
-            - 'GeneID': the gene identifier (originally from the counts file)
-            - 'log2FoldChange': estimated log2 fold change of expression between 
-              the tested group and reference group
-            - 'lfcSE': standard error of the log2 fold change
-            - 'stat': Wald test statistic
-            - 'pvalue': raw p-value for differential expression
-            - 'padj': adjusted p-value (Benjamini-Hochberg FDR correction)
-        - Can be **directly used for ranking genes** for GSEA or other enrichment analyses
-        - Index is reset (0..n-1), so 'GeneID' is a regular column, not the index
-
-    Note:
-    - DESeq2 is a robust method for RNA-seq differential expression analysis 
-      that accounts for library size differences and biological variability.
-    - This function is primarily a **preprocessing step** for GSEA. 
-      The output `results_df` can be ranked by log2 fold change or other statistics 
-      for enrichment analysis of gene sets.
+    - results_df: pandas DataFrame containing GSEA results
+        - Each row corresponds to one enriched gene set.
+        - Columns typically include:
+            - 'Term': gene set name
+            - 'NES': normalized enrichment score
+            - 'pval': nominal p-value
+            - 'fdr': FDR q-value
+            - 'Data Base': gene set database/source
+            - 'Pathway': gene set/pathway name
+        - This DataFrame can be used for downstream analysis or visualization.
     """
 
-    # --- Load counts ---
-    raw_counts = pd.read_csv(counts_file)
-    # raw_counts:
-    #   Rows: genes
-    #   Columns: sample names (e.g., "3_1", "5_2")
-    #   Values: raw read counts
-    raw_counts = raw_counts.set_index(gene_column)
-    raw_counts.index.name = None
-    # Filter lowly-expressed genes
-    filter_counts = raw_counts[(raw_counts > 10).sum(axis=1) > 0]
+    # Detect ID type
+    id_type = detect_id_type(dataset[hit_col].dropna().astype(str).tolist())
+    print(f"Detected ID type: {id_type}")
 
-    # --- Load metadata ---
-    sample_conditions = pd.read_csv(metadata_file)
-    # sample_conditions:
-    #   Column sample_column: sample IDs (to be matched with counts columns)
-    #   Column group_column: experimental group (e.g., "DMSO", "Cisplatin")
-    sample_conditions = fuzzy_rename_column(sample_conditions, sample_column, list(filter_counts.columns))
-    sample_conditions = sample_conditions[[sample_column, group_column]].set_index(sample_column)
-    sample_conditions[group_column] = pd.Categorical(sample_conditions[group_column])
+    # Map & prepare gene symbols
+    dataset = prepare_gene_symbols(dataset, hit_col)
+    if dataset.empty:
+        print("No valid gene symbols found after mapping.")
+        return pd.DataFrame()
 
-    # --- Build DESeq2 dataset ---
-    dds = DeseqDataSet(
-        counts=filter_counts.T,            # Transpose: DESeq expects samples as rows
-        metadata=sample_conditions,        # Metadata must match rows of counts
-        design_factors=group_column
+    # Set index to processed gene symbol
+    dataset = dataset.set_index('symbol').drop(hit_col, axis=1)
+
+    # Extract expression matrix for GSEA
+    norm_counts = dataset.copy()
+
+    # Extract classes
+    classes = list(metadata[group_column])
+
+    # Run GSEA
+    gs = GSEA(
+        data=norm_counts,
+        gene_sets=gene_sets,
+        classes=classes,
+        permutation_type=permutation_type,
+        permutation_num=permutation_num,
+        outdir=None,
+        method=method,
+        threads=threads,
+        seed=seed
     )
+    gs.pheno_pos = pheno_pos
+    gs.pheno_neg = pheno_neg
+    gs.run()
 
-    # --- Run normalization and dispersion estimation ---
-    dds.deseq2()
+    # Convert results to DataFrame
+    results_df = pd.DataFrame(gs.res2d)
 
-    # --- Automatically pick reference/tested levels ---
-    group_levels = dds.obs[group_column].unique()
-    reference_level = group_levels[0]
-    tested_level = group_levels[1]
+    # Optional: parse term names if multiple gene sets
+    if not isinstance(gene_sets, (list, tuple)):
+        gene_sets = [gene_sets]
 
-    print(f"Reference level: {reference_level}")
-    print(f"Tested level: {tested_level}")
+    if len(gene_sets) >= 2:
+        results_df[['Data Base', 'Pathway']] = results_df['Term'].str.split('__', expand=True)
+    else:
+        results_df['Pathway'] = results_df['Term']
+        results_df['Data Base'] = gene_sets[0]
 
-    # --- Run DESeq2 stats ---
-    contrast = [group_column, tested_level, reference_level]
-    print("Using contrast:", contrast)
+    pval_columns = [col for col in results_df.columns if "p-val" in col or "q-val" in col]
+    results_df = results_df[results_df[pval_columns].lt(threshold).any(axis=1)]
+    results_df = results_df.sort_values(by="NES", ascending=False)
 
-    stat_res = DeseqStats(
-        dds,
-        contrast=contrast,
-        inference=DefaultInference(n_cpus=4)
-    )
-
-    # --- Return tidy results ---
-    results_df = stat_res.results_df.copy()
-    results_df.index.name = "GeneID"
-    results_df = results_df.reset_index()
     return results_df
-
 
 def nrank_ora(
     dataset,
