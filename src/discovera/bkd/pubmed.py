@@ -81,8 +81,8 @@ def plot_publication_timeline(years: list[int], term: str, figsize: tuple = (12,
 
     ax.grid(True, axis='y', linestyle='--', alpha=0.7)
     plt.tight_layout()
-    plt.show()
-    display(fig)
+    # plt.show()
+    # display(fig)
     return fig
 
 
