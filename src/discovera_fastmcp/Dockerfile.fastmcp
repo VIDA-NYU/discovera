@@ -1,0 +1,25 @@
+FROM --platform=linux/amd64 python:3.11-slim
+
+# Prevent Python from writing .pyc files and enable unbuffered logs
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# Install runtime dependencies first for better layer caching
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+# Copy the application source
+COPY src /app/src
+COPY .env /app/.env
+
+# Ensure package-style imports (src.*) resolve when running the module
+ENV PYTHONPATH=/app
+
+EXPOSE 8000
+
+# Run the FastMCP server. Requires OPENAI_API_KEY to be provided at runtime.
+CMD ["python", "-m", "src.discovera_fastmcp.server"]
+
+
