@@ -28,7 +28,7 @@ from src.eval.prompting import *
 from src.eval.evaluation import *
 
 # -----------------------------
-# Parameters (easily modifiable)
+# Parameters
 # -----------------------------
 # Dataset names (rs = report source)
 rs_list = ["rsdiscovera(gpt-4o)", "rsgroundtruth"]         # Can add more report sources

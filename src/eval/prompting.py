@@ -11,7 +11,7 @@ from collections import Counter
 from statistics import mode, StatisticsError
 
 
-def load_openai_key(beaker_conf_path="../.beaker.conf"):
+def load_openai_key(beaker_conf_path="../../.beaker.conf"):
     """
     Load OpenAI API key from a Beaker configuration file.
 
