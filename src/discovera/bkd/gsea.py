@@ -663,7 +663,9 @@ def nrank_ora(
     results = results[results["Adjusted P-value"] < 0.05]
     results = results.sort_values(by="Combined Score", ascending=False)
     save_with_timestamp(results, "ora_results", timestamp)
-    print(f"Number of matching results: {len(results)}")
 
-    return results
+    filtered_results = results.head(20)
+    print(f"Number of matching results: {len(filtered_results)}")
+
+    return  filtered_results
 
