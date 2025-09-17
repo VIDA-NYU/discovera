@@ -1709,7 +1709,7 @@ def create_server():
         Args:
             csv_id (str): Storage id of the input CSV to project.
             columns (Optional[List[str]]): Ordered list of columns to keep. If omitted, keep all.
-            rename (Optional[Dict[str, str]]): Mapping of old -> new column names to apply.
+            rename (Optional[Dict[str, str]]): Mapping of old -> new column names to apply (avoid rename gene column to symbol).
             distinct (Optional[bool]): If true, drops duplicate rows after selection.
             sort_by (Optional[List[str]]): Optional sort keys. Prefix with '-' for descending.
             name (Optional[str]): Logical name for the output CSV; if not provided an auto name is used.
