@@ -55,7 +55,7 @@ def load_and_merge_reports(
     return merged
 
 
-def calculate_agreement(df):
+def calculate_agreement(df, output_dir="../../output/"):
     """
     Calculate agreement/disagreement 
     at dataset and subset levels. Meaning per question.
@@ -116,32 +116,38 @@ def calculate_agreement(df):
         agreement_gt = _compute_agreement(df[df['question_source'] == gt_suffix], gt_col, gen_col)
         agreement_gen = _compute_agreement(df[df['question_source'] == gen_suffix], gt_col, gen_col)
 
-        result = {
+        results_dict = {
             'columns_compared': (col1, col2),
             'overall': overall,
             f'agreement_{gt_suffix}': agreement_gt,
             f'agreement_{gen_suffix}': agreement_gen
         }
 
+        # --- Create tidy DataFrame ---
+        results_df = pd.DataFrame([
+            {"level": "overall", **overall},
+            {"level": f"{gt_suffix}_questions", **agreement_gt},
+            {"level": f"{gen_suffix}_questions", **agreement_gen}
+        ])
+
+        # --- Save CSV if requested ---
+        if output_dir:
+            results_df.to_csv(os.path.join(output_dir, "accuracy_precision_recall.csv"), index=False)
+            print(f"Results saved to {output_dir}")
+
         # --- Pretty printing ---
         print(f"=== Comparing: {col1} vs {col2} ===\n")
-        print("=== Overall Agreement on Total Questions ===\n")
-        print(pd.DataFrame([overall]), "\n")
-        
-        print(f"=== Agreement on Questions Based on Content from {gt_suffix.upper()} Report ===\n")
-        print(pd.DataFrame([agreement_gt]), "\n")
-        
-        print(f"=== Agreement on Questions Generated Based on Content from {gen_suffix.upper()} Report ===\n")
-        print(pd.DataFrame([agreement_gen]), "\n")
-        
-        return result
+        print(results_df.to_string(index=False))
+
+        return results_dict, results_df
 
     except Exception as e:
         print(f"Error calculating dataset agreement: {e}")
-        return None
+        return None, None
 
 
-def agreement_x_analysis(df, output_dir="../output/"):
+
+def agreement_x_analysis(df, output_dir="../../output/"):
     """
     Generate publication-quality agreement plots using plotnine (ggplot style).
     
@@ -187,6 +193,7 @@ def agreement_x_analysis(df, output_dir="../output/"):
 
         # --- Plot 1: Overall histogram ---
         mean_overall = overall_df["Agreement_Percentage"].mean()
+        print(mean_overall)
         std_overall = overall_df["Agreement_Percentage"].std()
 
         vlines_df = pd.DataFrame({
@@ -199,6 +206,7 @@ def agreement_x_analysis(df, output_dir="../output/"):
             geom_histogram(binwidth=5, fill="#999999", color="black", alpha=0.8) +
             geom_vline(aes(xintercept="value", color="type"), data=vlines_df, linetype="dashed", size=0.6) +
             scale_color_manual(values={"Mean": "blue", "Mean ± 1 SD": "green"}) +
+            scale_x_continuous(limits=(0,100)) +
             labs(
                 title="Overall Task-Level Agreement",
                 x="Agreement Percentage",
@@ -216,11 +224,30 @@ def agreement_x_analysis(df, output_dir="../output/"):
         p1.save(os.path.join(output_dir, "agreement_hist_overall_gg.png"), dpi=600)
 
         # --- Plot 2: Disaggregated histogram by question_source ---
+        # find unique sources
+        sources = disagg_df["Question_Source"].unique()
+        # Make sure groundtruth is first
+        ordered_sources = sorted(sources, key=lambda s: 0 if "groundtruth" in s.lower() else 1)
+
+        # Build color map accordingly
+        color_map = {
+            s: ("#4C72B0" if "groundtruth" in s.lower() else "#55A868")
+            for s in ordered_sources
+        }
         p2 = (
             ggplot(disagg_df, aes(x="Agreement_Percentage", fill="Question_Source")) +
-            geom_histogram(binwidth=5, position="identity", alpha=0.6, color="black") +
-            scale_fill_manual(values=["#4C72B0", "#55A868"]) +
-            labs(title="Agreement by Question Source", x="Agreement Percentage", y="Number of Reports") +
+            geom_histogram(binwidth=10, boundary=0, position="identity", alpha=0.6, color="black") +
+            scale_fill_manual(
+                values=color_map,
+                breaks=ordered_sources   # <- controls legend order
+            ) +            
+            scale_x_continuous(limits=(0,100)) +
+            scale_y_continuous(breaks=range(0, 10+1), limits=(0, 10)) +
+            labs(
+                title="Agreement by Question Source",
+                x="Agreement Percentage",
+                y="Number of Reports"
+            ) +
             theme_bw() +
             theme(
                 figure_size=(8,6),
@@ -239,6 +266,8 @@ def agreement_x_analysis(df, output_dir="../output/"):
             geom_boxplot(alpha=0.6) +
             geom_jitter(width=0.2, alpha=0.5, size=2, color="black") +
             scale_fill_manual(values=["#4C72B0", "#55A868"]) +
+            #scale_x_continuous(limits=(0,100)) +
+            scale_y_continuous(limits=(0,100)) +
             labs(title="Agreement Distribution by Question Source", x="Question Source", y="Agreement Percentage") +
             theme_bw() +
             theme(
@@ -276,6 +305,7 @@ def agreement_x_analysis(df, output_dir="../output/"):
             geom_abline(slope=1, intercept=0, linetype='dashed', color='red') +
             scale_x_continuous(limits=(0, 100)) +
             scale_y_continuous(limits=(0, 100)) +
+
             labs(
                 title=(
                     f"Task-Level Answer Agreement (%)\n\n"
@@ -300,7 +330,17 @@ def agreement_x_analysis(df, output_dir="../output/"):
 
         # --- Save statistics ---
         overall_df.to_csv(os.path.join(output_dir, "agreement_report_level.csv"), index=False)
-        disagg_df.to_csv(os.path.join(output_dir, "agreement_report_level_by_source.csv"), index=False)
+        # Create a custom sort key for Question_Source: 0 for groundtruth, 1 for others
+        disagg_df['Source_Order'] = disagg_df['Question_Source'].apply(
+            lambda x: 0 if 'groundtruth' in x.lower() else 1
+        )
+
+        # Sort by Task_ID first, then by source_order
+        disagg_df_sorted = disagg_df.sort_values(by=['Task_ID', 'Source_Order'])
+
+        # Drop the temporary column before saving
+        disagg_df_sorted = disagg_df_sorted.drop(columns=['Source_Order'])
+        disagg_df_sorted.to_csv(os.path.join(output_dir, "agreement_report_level_by_source.csv"), index=False)
 
         aggregated_stats = pd.DataFrame({
             "Mean_Agreement": [mean_overall],

@@ -2,22 +2,24 @@
 """
 Generate questions based on content from Ground Truth (GT), Discovera or LLM-generated reports.
 
-Each run is logged to a timestamped log file and outputs are saved
-with unique prefixes to avoid overwriting previous results.
+Each run is saved into a timestamped folder. Logs and outputs are stored
+inside that folder to keep runs organized and avoid overwriting results.
 
 Example usage:
     python generate_questions.py \
-        --benchmark ../data/benchmark/benchmark.csv \
+        --benchmark ../../data/benchmark/benchmark.csv \
         --report-columns "Ground Truth" "Discovera (gpt-4o)" \
         --ns 10 \
         --model gpt-5 \
-        --out ../data/questions/
+        --out ../../data/experiments/
 """
 
 import sys
 import os
 import argparse
 import logging
+import inspect
+
 from datetime import datetime
 
 # Add project root to Python path
@@ -59,17 +61,14 @@ def parse_args():
         "--out",
         type=str,
         default="../data/questions/",
-        help="Output directory for generated questions."
+        help="Base output directory for generated questions."
     )
     return parser.parse_args()
 
 
-def setup_logger(out_dir, model):
+def setup_logger(run_dir, model):
     """Configure logging to both console and file."""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = os.path.join(out_dir, f"run_{model}_{timestamp}.log")
-
-    os.makedirs(out_dir, exist_ok=True)
+    log_file = os.path.join(run_dir, f"run_{model}.log")
 
     logging.basicConfig(
         level=logging.INFO,
@@ -82,36 +81,43 @@ def setup_logger(out_dir, model):
     logging.info(f"Logging to {log_file}")
 
 
+def save_prompt_template(run_dir, prompt_template):
+    """Save the prompt template function source for reproducibility."""
+    template_file = os.path.join(run_dir, "prompt_template.txt")
+    with open(template_file, "w", encoding="utf-8") as f:
+        f.write(inspect.getsource(prompt_template))
+    logging.info(f"Prompt template source saved to {template_file}")
+
 def main():
     args = parse_args()
 
-    os.makedirs(args.out, exist_ok=True)
-    setup_logger(args.out, args.model)
-
+    # Fixed timestamp folder for the whole run
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    experiment_dir = os.path.join(args.out, f"{args.model}_{timestamp}/questions")
+    os.makedirs(experiment_dir, exist_ok=True)
+
+    setup_logger(experiment_dir, args.model)
+
+    # Save the current prompt template for reproducibility
+    save_prompt_template(experiment_dir, multiple_questions_template)
 
     for col in args.report_columns:
         logging.info(f"Loading reports from column: {col}")
         reports = load_reports(args.benchmark, report_column=col)
 
-        prefix = f"{args.model}_{col.replace(' ', '_')}_{timestamp}"
-        col_out = os.path.join(args.out, prefix)
-        os.makedirs(col_out, exist_ok=True)
-
         logging.info(
-            f"Generating {args.ns} questions per report "
-            f"(model={args.model}, out={col_out})"
+            f"Generating max {args.ns} questions per report "
+            f"(model={args.model}, out={experiment_dir})"
         )
         generate_questions(
             reports=reports,
             prompt_template=multiple_questions_template,
             model=args.model,
             num_questions=args.ns,
-            output_path=col_out
+            output_path=experiment_dir
         )
 
     logging.info("Question generation completed successfully.")
-
 
 if __name__ == "__main__":
     try:

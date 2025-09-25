@@ -154,8 +154,8 @@ def get_llm(backend: str, model: str = None, **kwargs):
 
 def multiple_questions_template(report_text: str, prompt: str, n: int) -> str:
     return f"""
-        You are a biomedical researcher. Your task is to generate up to {n} multiple-choice questions strictly based on the analysis provided below.
-        The analysis answers the following quiding question: {prompt}.
+        You are a biomedical researcher. Your task is to generate UP TO {n} multiple-choice questions strictly based on the ANALYSIS provided below.
+        The ANALYSIS answers the following guiding question: {prompt}.
         --- BEGIN ANALYSIS ---
         {report_text}
         --- END ANALYSIS ---
@@ -171,10 +171,13 @@ def multiple_questions_template(report_text: str, prompt: str, n: int) -> str:
             B. <choice text>
             C. <choice text>
             D. <choice text>
-        7. For each question, indicate the single correct answer as an uppercase letter: "A", "B", "C", or "D".
-
+        7. The correct answer should be randomly distributed among A, B, C, or D — avoid always placing it as "A".
+        8. Occasionally, you may include "None of the above" as one of the four choices if appropriate — but do not overuse it. It can be either correct or incorrect.
+        9. If fewer than {n} high-quality questions can be generated, provide only those that meet the criteria.
+        10. Ensure the output is valid JSON.
+                    
         Output format:
-        A JSON list of {n} objects, where each object contains:
+        A JSON list of up to {n} objects, where each object contains:
         - "question": string
         - "choices": list of 4 strings (each starting with "A. ", "B. ", etc.)
         - "correct": string (one of "A", "B", "C", "D")
@@ -189,12 +192,10 @@ def multiple_questions_template(report_text: str, prompt: str, n: int) -> str:
             "C. Pathway C",
             "D. Pathway D"
             ],
-            "correct": "A"
+            "correct": "B"
         }}
-        ...
         ]
         """.strip()
-
 
 
 def answer_prompt_template(
@@ -202,7 +203,7 @@ def answer_prompt_template(
 ) -> str:
     if report:
         prompt = f"""
-        You are a biomedical domain expert. Use ONLY the information provided in the report below to answer the question.
+        You are a biomedical domain expert. Use ONLY the information provided in the ANALYSIS below to answer the question.
         --- BEGIN ANALYSIS ---
         {report}
         --- END ANALYSIS ---
@@ -217,7 +218,7 @@ def answer_prompt_template(
         {choices[3]}
 
         Instructions:
-        - Select the best choice if it is explicitly stated or can be directly inferred from the analysis.
+        - Select the best choice if it is explicitly stated or can be directly inferred from the ANALYSIS.
         - Do NOT use any outside knowledge, assumptions, or speculation.
         
         Respond ONLY in this JSON format:
@@ -327,9 +328,9 @@ def generate_questions(
         
         # Decide per-report question count
         if custom_counts:
-            count = num_questions.get(report_id)
+            count = num_questions.get(task_id)
             if count is None:
-                print(f"[WARNING] No num_questions specified for {report_id}. Skipping.")
+                print(f"[WARNING] No num_questions specified for {task_id}. Skipping.")
                 continue
         else:
             count = num_questions  # single fixed integer
@@ -422,7 +423,7 @@ def respond_question(
             report_text = reports_dict.get(idx)
             print(f"[INFO] Answering questions with access to report text ...\n")            
             prompt = answer_prompt_template(q["question"], q["choices"], report=report_text)
-            print(prompt)
+            # print(prompt)
 
         try:
             response = llm.run(prompt, json_output=True)

@@ -7,15 +7,19 @@ set -euo pipefail
 # Config (edit as needed)
 # ------------------------
 BENCHMARK="../../data/benchmark/benchmark.csv"
-OUTDIR="../../data/questions/"
-NS=10
+OUTDIR="../../data/experiments/"
+NS=10 # Number of samples per question
 
 # List of models to try
 MODELS=("gpt-5")
 
 # List of report columns
-#REPORT_COLUMNS=("LLM (gpt-4o)" "Discovera (gpt-4o)")
-REPORT_COLUMNS=("Discovera (gpt-4o)")
+REPORT_COLUMNS=(
+  #"LLM (gpt-4o)" 
+  #"Discovera (gpt-4o)" 
+  #"Ground Truth"
+  "Biomni"
+  )
 
 # ------------------------
 # Run
