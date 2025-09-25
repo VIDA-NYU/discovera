@@ -499,7 +499,7 @@ def create_server():
             return df.sort_values(by=filtered_cols, ascending=asc_filtered)
         except Exception:
             return df
-    
+
     @mcp.tool()
     async def query_genes(
         genes: List[str],
@@ -676,6 +676,10 @@ def create_server():
         shows a consistent pattern of upregulation or downregulation between two conditions
         (e.g., healthy vs. diseased, treated vs. untreated). GSEA helps identify pathways
         that are significantly enriched in the data.
+
+        Note for LLM agents:
+            - This tool returns only the top results (high/low NES) for brevity.
+            - To explore more rows, use `csv_filter`, `csv_select`, `csv_intersect` on returned gsea_result_metadata.
 
         Args:
             csv_id (str): ID of a stored CSV entry (required).
@@ -867,6 +871,10 @@ def create_server():
         shows a consistent pattern of upregulation or downregulation between two conditions
         (e.g., healthy vs. diseased, treated vs. untreated). ORA helps identify pathways
         that are significantly enriched in your data.
+
+        Note for LLM agents:
+            - This tool returns only the top results to keep responses concise.
+            - Use `csv_read`/`csv_filter`/`csv_select` to view additional rows on returned ora_result_metadata.
 
         Args:
             csv_id (str): ID of a stored CSV entry (required).
@@ -1709,7 +1717,8 @@ def create_server():
         Args:
             csv_id (str): Storage id of the input CSV to project.
             columns (Optional[List[str]]): Ordered list of columns to keep. If omitted, keep all.
-            rename (Optional[Dict[str, str]]): Mapping of old -> new column names to apply (avoid rename gene column to symbol).
+            rename (Optional[Dict[str, str]]): Mapping of old -> new column names to apply
+                (**avoid renaming gene column to "symbol"**).
             distinct (Optional[bool]): If true, drops duplicate rows after selection.
             sort_by (Optional[List[str]]): Optional sort keys. Prefix with '-' for descending.
             name (Optional[str]): Logical name for the output CSV; if not provided an auto name is used.
@@ -1741,7 +1750,12 @@ def create_server():
                 existing = [c for c in params.columns if c in out.columns]
                 out = out[existing]
             if params.rename:
-                out = out.rename(columns={k: v for k, v in (params.rename or {}).items() if k in out.columns})
+                mapping = {
+                    k: v
+                    for k, v in (params.rename or {}).items()
+                    if k in out.columns
+                }
+                out = out.rename(columns=mapping)
             if params.distinct:
                 out = out.drop_duplicates()
             if params.sort_by:
