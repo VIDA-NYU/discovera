@@ -418,9 +418,13 @@ def run_deseq2(raw_counts, sample_conditions, gene_column="Unnamed: 0",
     sample_conditions[group_column] = pd.Categorical(sample_conditions[group_column])
 
     # --- Build DESeq2 dataset ---
+    # Align metadata rows to counts rows (samples) exactly
+    counts_t = filter_counts.T
+    # Ensure metadata index order matches counts_t index
+    sample_conditions = sample_conditions.loc[counts_t.index]
     dds = DeseqDataSet(
-        counts=filter_counts.T,            # Transpose: DESeq expects samples as rows
-        metadata=sample_conditions,        # Metadata must match rows of counts
+        counts=counts_t,            # Transpose: DESeq expects samples as rows
+        metadata=sample_conditions, # Metadata must match rows of counts
         design_factors=group_column
     )
 
