@@ -1,4 +1,5 @@
-from typing import List, Optional, Dict, Any
+from typing import Any, Dict, List, Optional, Union
+
 from pydantic import BaseModel, Field
 
 
@@ -368,78 +369,280 @@ Number of rows to return from the top of the CSV (preview).
 
 
 class CsvFilterCondition(BaseModel):
-    column: str = Field(description="""
+    column: str = Field(
+        description="""
 Column to filter on.
-""")
-    op: str = Field(description="""
+"""
+    )
+    op: str = Field(
+        description="""
 Operator: one of ==, !=, >, >=, <, <=, in, not_in, contains, not_contains, startswith, endswith, isnull, notnull.
-""")
-    value: Optional[Any] = Field(default=None, description="""
+"""
+    )
+    value: Optional[Any] = Field(
+        default=None,
+        description="""
 Right-hand value for comparison; for in/not_in provide list.
-""")
+""",
+    )
 
 
 class CsvFilterInput(BaseModel):
-    csv_id: str = Field(description="""
+    csv_id: str = Field(
+        description="""
 ID of a stored CSV entry to filter (required).
-""")
-    conditions: List[CsvFilterCondition] = Field(description="""
+"""
+    )
+    conditions: List[CsvFilterCondition] = Field(
+        description="""
 List of filter conditions combined with AND logic.
-""")
-    keep_columns: Optional[List[str]] = Field(default=None, description="""
+"""
+    )
+    keep_columns: Optional[List[str]] = Field(
+        default=None,
+        description="""
 Optional subset of columns to keep in the output.
-""")
-    sort_by: Optional[List[str]] = Field(default=None, description="""
+""",
+    )
+    sort_by: Optional[List[str]] = Field(
+        default=None,
+        description="""
 Optional columns to sort by (prefix with '-' for descending).
-""")
-    drop_duplicates: Optional[bool] = Field(default=False, description="""
+""",
+    )
+    drop_duplicates: Optional[bool] = Field(
+        default=False,
+        description="""
 Whether to drop duplicate rows after filtering.
-""")
-    name: Optional[str] = Field(default=None, description="""
+""",
+    )
+    name: Optional[str] = Field(
+        default=None,
+        description="""
 Optional logical name for the output CSV; defaults to auto timestamp.
-""")
+""",
+    )
 
 
 class CsvIntersectInput(BaseModel):
-    left_csv_id: str = Field(description="""
+    left_csv_id: str = Field(
+        description="""
 ID of the left CSV (required).
-""")
-    right_csv_id: str = Field(description="""
+"""
+    )
+    right_csv_id: str = Field(
+        description="""
 ID of the right CSV (required).
-""")
-    on: str = Field(description="""
+"""
+    )
+    on: str = Field(
+        description="""
 Column name to intersect on (must exist in both CSVs).
-""")
-    left_keep: Optional[List[str]] = Field(default=None, description="""
+"""
+    )
+    left_keep: Optional[List[str]] = Field(
+        default=None,
+        description="""
 Optional columns to keep from left CSV (defaults to all).
-""")
-    right_keep: Optional[List[str]] = Field(default=None, description="""
+""",
+    )
+    right_keep: Optional[List[str]] = Field(
+        default=None,
+        description="""
 Optional columns to keep from right CSV (defaults to none).
-""")
-    distinct: Optional[bool] = Field(default=True, description="""
+""",
+    )
+    distinct: Optional[bool] = Field(
+        default=True,
+        description="""
 Return distinct rows by the join key.
-""")
-    name: Optional[str] = Field(default=None, description="""
+""",
+    )
+    name: Optional[str] = Field(
+        default=None,
+        description="""
 Optional logical name for the output CSV; defaults to auto timestamp.
-""")
+""",
+    )
 
 
 class CsvSelectInput(BaseModel):
-    csv_id: str = Field(description="""
+    csv_id: str = Field(
+        description="""
 ID of a stored CSV entry (required).
-""")
-    columns: Optional[List[str]] = Field(default=None, description="""
+"""
+    )
+    columns: Optional[List[str]] = Field(
+        default=None,
+        description="""
 Columns to keep (in order). If omitted, keep all.
-""")
-    rename: Optional[Dict[str, str]] = Field(default=None, description="""
+""",
+    )
+    rename: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="""
 Optional mapping of old_name -> new_name for renaming.
-""")
-    distinct: Optional[bool] = Field(default=False, description="""
+""",
+    )
+    distinct: Optional[bool] = Field(
+        default=False,
+        description="""
 Whether to drop duplicate rows after selection.
-""")
-    sort_by: Optional[List[str]] = Field(default=None, description="""
+""",
+    )
+    sort_by: Optional[List[str]] = Field(
+        default=None,
+        description="""
 Optional columns to sort by (prefix with '-' for descending).
-""")
-    name: Optional[str] = Field(default=None, description="""
+""",
+    )
+    name: Optional[str] = Field(
+        default=None,
+        description="""
 Optional logical name for the output CSV; defaults to auto timestamp.
-""")
+""",
+    )
+
+
+class CsvMergeAverageInput(BaseModel):
+    left_csv_id: str = Field(
+        description="""
+ID of the left CSV (required).
+"""
+    )
+    right_csv_id: str = Field(
+        description="""
+ID of the right CSV (required).
+"""
+    )
+    on: str = Field(
+        description="""
+Join key column present in both CSVs (e.g., "gene").
+"""
+    )
+    left_cols: Optional[List[str]] = Field(
+        default=None,
+        description="""
+Columns to include from the left CSV (must include the join key). If omitted, include all.
+""",
+    )
+    right_cols: Optional[List[str]] = Field(
+        default=None,
+        description="""
+Columns to include from the right CSV (must include the join key). If omitted, include all.
+""",
+    )
+    avg_map: Dict[str, List[str]] = Field(
+        description="""
+Mapping of output_column -> [left_column, right_column] to average, e.g.,
+{"log2FoldChange": ["log2FoldChange_left", "log2FoldChange_right"],
+ "padj": ["padj_left", "padj_right"]}.
+"""
+    )
+    name: Optional[str] = Field(
+        default=None,
+        description="""
+Optional logical name for the output CSV; defaults to auto timestamp.
+""",
+    )
+
+
+class CsvJoinInput(BaseModel):
+    left_csv_id: str = Field(
+        description="""
+ID of the left CSV (required).
+"""
+    )
+    right_csv_id: str = Field(
+        description="""
+ID of the right CSV (required).
+"""
+    )
+    on: str = Field(
+        description="""
+Join key column present in both CSVs (e.g., "gene").
+"""
+    )
+    how: Optional[str] = Field(
+        default="inner",
+        description="""
+Join type: 'inner' | 'left' | 'right' | 'outer'. Defaults to 'inner'.
+""",
+    )
+    select: Optional[Dict[str, List[str]]] = Field(
+        default=None,
+        description="""
+Optional selection mapping: {"left": [cols...], "right": [cols...]}. If omitted, use all columns.
+""",
+    )
+    suffixes: Optional[List[str]] = Field(
+        default=["_left", "_right"],
+        description="""
+Suffixes for overlapping column names, e.g., ["_left", "_right"].
+""",
+    )
+    name: Optional[str] = Field(
+        default=None,
+        description="""
+Optional logical name for the output CSV; defaults to auto timestamp.
+""",
+    )
+
+
+class CsvAggregateInput(BaseModel):
+    csv_id: str = Field(
+        description="""
+ID of a stored CSV entry (required).
+"""
+    )
+    aggregations: Dict[str, Dict[str, Union[str, List[str]]]] = Field(
+        description="""
+Aggregation mapping of output_col -> {"func": "mean|sum|min|max|median|first|last", "cols": [colA, colB, ...]}.
+E.g.: {"log2FoldChange": {"func": "mean", "cols": ["log2FoldChange_left", "log2FoldChange_right"]},
+       "padj": {"func": "mean", "cols": ["padj_left", "padj_right"]}}
+"""
+    )
+    name: Optional[str] = Field(
+        default=None,
+        description="""
+Optional logical name for the output CSV; defaults to auto timestamp.
+""",
+    )
+
+
+class RunDeseq2GseaInput(BaseModel):
+    raw_counts_csv_id: str = Field(
+        description="""
+ID of stored CSV containing raw counts (genes × samples). One column contains gene IDs.
+"""
+    )
+    sample_groups: Optional[Dict[str, List[str]]] = Field(
+        default=None,
+        description="""
+Mapping of {group_name: [sample_id, ...]} used to construct sample metadata directly
+from raw count column names (no separate metadata CSV required).
+""",
+    )
+    gene_column: Optional[str] = Field(
+        default="Unnamed: 0",
+        description="""
+Column name in raw counts holding gene identifiers.
+""",
+    )
+    gene_sets: Optional[List[str]] = Field(
+        default=[
+            "KEGG_2016",
+            "GO_Biological_Process_2023",
+            "Reactome_Pathways_2024",
+            "MSigDB_Hallmark_2020",
+        ],
+        description="""
+Gene set libraries to use in downstream GSEA.
+""",
+    )
+    threshold: Optional[float] = Field(
+        default=0.05,
+        description="""
+Threshold GSEA p-value.
+""",
+    )
