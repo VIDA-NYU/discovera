@@ -483,7 +483,8 @@ def rank_gsea(dataset, gene_sets, hit_col, corr_col,
             min_size=min_size,
             max_size=max_size,
             outdir=None,
-            verbose=True
+            verbose=True,
+            threads=16
         )
     except Exception as e:
         print(f"GSEA prerank failed: {e}")
