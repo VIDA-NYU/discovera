@@ -532,6 +532,7 @@ def create_server():
         except Exception:
             return df
 
+    @mcp.tool()
     async def run_deseq2_gsea_pipe(
         raw_counts_csv_id: str,
         sample_groups: Optional[Dict[str, List[str]]] = None,
@@ -540,42 +541,45 @@ def create_server():
         threshold: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
-        Performs DESeq2 differential expression from raw RNA-seq counts, then runs
-        Gene Set Enrichment Analysis (GSEA, preranked) on the resulting table to
-        identify enriched pathways.
+        Performs DESeq2 differential expression (DE) from raw RNA‑seq counts, then runs
+        Gene Set Enrichment Analysis (GSEA, preranked) on the DE results to identify enriched pathways.
 
-        Note for LLM agents:
-            - This tool returns only the top GSEA results in responses for brevity.
-            - To explore full tables, use CSV tools on the returned metadata:
-              `csv_read` / `csv_filter` / `csv_select` for
-              `deseq2_result_metadata` and `gsea.gsea_result_metadata`.
+        High-level behavior
+        - Input: a raw counts matrix (genes × samples) and a mapping of samples to groups.
+        - Step 1 (DE): Runs DESeq2 to compute per-gene log2FoldChange and adjusted p-values (padj).
+        - Step 2 (GSEA): Ranks genes by log2FoldChange and runs preranked GSEA across the selected libraries.
+        - Output: Top GSEA results in the immediate response + storage IDs for full DESeq2 and GSEA result tables (use CSV tools to fetch all rows).
 
         Args:
-            raw_counts_csv_id (str): ID of stored CSV with raw counts (genes × samples).
-                One column contains gene identifiers (see `gene_column`).
-            sample_groups (Optional[Dict[str, List[str]]]): Mapping of {group_name: [sample_id, ...]}.
-                If provided, a sample metadata table will be built internally.
-            gene_column (str, optional): Column in raw counts holding gene identifiers.
-
-            gene_sets (Optional[List[str]]): Gene set libraries for GSEA. Defaults to
-                ["KEGG_2016", "GO_Biological_Process_2023", "Reactome_Pathways_2024",
-                "MSigDB_Hallmark_2020"].
-
-            threshold (float, optional): Multiple-testing filter used by downstream GSEA.
-                Defaults to 0.05.
+            raw_counts_csv_id (str):
+                Storage ID for the raw counts CSV (genes × samples). One column must hold gene identifiers
+                (see `gene_column`). Prefer raw counts over normalized matrices.
+            sample_groups (Optional[Dict[str, List[str]]]):
+                Mapping of {group_name: [sample_id, ...]} used to build DE design (default ~ group)..
+                Numeric sample patterns like "3_1", "3_2", "7_1" are supported.
+                e.g.
+                sample_groups = {
+                    "CBD":  ["3_1", "3_2", "3_3"],
+                    "DMSO": ["7_1", "7_2", "7_3"],
+                }
+            gene_column (str, optional):
+                Column name in the raw counts CSV that contains gene identifiers. Defaults to the first non-sample column.
+            gene_sets (Optional[List[str]]):
+                Gene set libraries for GSEA. Defaults to:
+                ["KEGG_2016", "GO_Biological_Process_2023", "Reactome_Pathways_2024", "MSigDB_Hallmark_2020"].
+            threshold (float, optional):
+                Multiple-testing filter used by downstream GSEA (e.g., for display/selection). Default: 0.05.
 
         Returns:
-            Dict[str, Any]:
-                - top_high_nes: Top 5 high NES results for each database.
-                - top_low_nes: Top 5 low NES results for each database.
+            Dict[str, Any] with keys including:
+                - top_high_nes: Top 5 positive NES results per library (preview only).
+                - top_low_nes: Top 5 negative NES results per library (preview only).
                 - deseq2_preview: Preview of DESeq2 results (columns, rows, total_rows).
-                - deseq2_result_metadata: Storage entry for the saved DESeq2 results CSV.
-
-        Notes:
-            - GSEA is run with `hit_col="GeneID"` and `corr_col="log2FoldChange"` from
-              the DESeq2 results.
-            - Sample IDs may be fuzzy-matched to counts columns to align metadata.
-            - High NES and low FDR indicate strong, reliable enrichment.
+                - deseq2_result_metadata: Storage entry for the full DESeq2 results CSV.
+                - gsea: {
+                    "gsea_result_metadata": Storage entry for the full GSEA results CSV,
+                    "counts_by_database": Up/Down counts per library (for ratio summaries),
+                }
         """
         # Validate/construct params
         params = _validate_params(
@@ -795,6 +799,7 @@ def create_server():
             }
             return _exception_payload("run_deseq2_gsea_pipe", e, context)
 
+    @mcp.tool()
     async def query_genes(
         genes: List[str],
         size: Optional[int] = None,
