@@ -11,8 +11,8 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 # Copy the application source
-COPY src /app/src
-COPY .env /app/.env
+COPY src/discovera /app/src/discovera
+COPY src/discovera_fastmcp /app/src/discovera_fastmcp
 
 # Ensure package-style imports (src.*) resolve when running the module
 ENV PYTHONPATH=/app

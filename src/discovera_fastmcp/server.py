@@ -20,9 +20,7 @@ from typing import Any, Dict, List, Optional, Union
 
 import pandas as pd
 import requests
-from dotenv import load_dotenv
 from fastmcp import FastMCP
-from openai import OpenAI
 from pydantic import ValidationError
 from tqdm import tqdm
 
@@ -62,17 +60,9 @@ from src.discovera_fastmcp.pydantic import (
     StorageListInput,
 )
 
-load_dotenv()
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# OpenAI configuration
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-
-# Initialize OpenAI client
-openai_client = OpenAI()
 
 server_instructions = """
 You are an expert in biomedical research, focusing on mutation effects, treatment responses,
@@ -2317,14 +2307,6 @@ def create_server():
 
 def main():
     """Main function to start the MCP server."""
-    # Verify OpenAI client is initialized
-    if not openai_client:
-        logger.error(
-            "OpenAI API key not found. Please set OPENAI_API_KEY environment variable."
-        )
-        raise ValueError("OpenAI API key is required")
-
-    # Create the MCP server
     server = create_server()
 
     try:
