@@ -217,13 +217,16 @@ def answer_prompt_template(
         {choices[2]}
         {choices[3]}
 
+
         Instructions:
-        - Select the best choice if it is explicitly stated or can be directly inferred from the ANALYSIS.
-        - Do NOT use any outside knowledge, assumptions, or speculation.
-        
+        - Choose the correct answer ONLY if it is explicitly supported or can be directly inferred from the ANALYSIS.
+        - If the ANALYSIS does not contain sufficient evidence for any of the choices, respond with `"answer": "E"` (meaning I don't know).
+        - Do NOT use outside knowledge, prior experience, or speculation.
+        - If the evidence is incomplete or ambiguous, choose `"E"` rather than guessing.
+
         Respond ONLY in this JSON format:
         {{
-          "answer": "<A/B/C/D",
+          "answer": "<A/B/C/D/E",
           "confidence": <float between 0 and 1>
         }}
         """.strip()
