@@ -103,14 +103,14 @@ def literature_timeline(term: str, email: str, batch_size: int = 500, figsize: t
         year: [f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" for pmid in pmids]
         for year, pmids in year_to_ids.items()
     }
-    fig = plot_publication_timeline(pub_years, term, figsize)
-    # Save figure in Beaker environment
-    filename = f"{term.replace(' ', '_')}_timeline.png"
-    save_path = os.path.join(".", filename)  # Beaker userfiles folder
-    fig.savefig(save_path, dpi=300, bbox_inches='tight')
+    # fig = plot_publication_timeline(pub_years, term, figsize)
+    # # Save figure in Beaker environment
+    # filename = f"{term.replace(' ', '_')}_timeline.png"
+    # save_path = os.path.join(".", filename)  # Beaker userfiles folder
+    # fig.savefig(save_path, dpi=300, bbox_inches='tight')
 
-    print(f"Figure saved to Beaker environment: {save_path}")
-    return year_to_ids, save_path
+    # print(f"Figure saved to Beaker environment: {save_path}")
+    return year_to_ids, None
 
 
 def search_pubmed_count(query: str, email: str = "test@example.com") -> int:

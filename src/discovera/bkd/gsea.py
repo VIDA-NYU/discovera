@@ -513,11 +513,11 @@ def rank_gsea(dataset, gene_sets, hit_col, corr_col,
     print(f"Number of matching results with p-val < {threshold}: {len(results_df)}")
 
     sorted_results = results_df.sort_values(by="NES", ascending=False)
-    top_low_nes = sorted_results.head(10)
-    top_high_nes = sorted_results.tail(10)
-    top_combined = pd.concat([top_high_nes, top_low_nes]).drop_duplicates()
+    # top_low_nes = sorted_results.head(10)
+    # top_high_nes = sorted_results.tail(10)
+    # top_combined = pd.concat([top_high_nes, top_low_nes]).drop_duplicates()
 
-    plot_gsea_results(top_combined, timestamp)
+    # plot_gsea_results(top_combined, timestamp)
     return sorted_results
 
 

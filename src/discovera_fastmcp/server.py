@@ -5,24 +5,28 @@ This server implements the Model Context Protocol (MCP) with search and fetch
 capabilities designed to work with ChatGPT's chat and deep research features.
 """
 
+import asyncio
 import base64
+import functools
 import hashlib
 import io
 import json
 import logging
 import os
 import traceback
-import asyncio
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import datetime
 from itertools import combinations
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
-import functools
 
+import boto3
 import pandas as pd
 import requests
-from fastmcp import FastMCP, Context
+from botocore.config import Config as BotoConfig
+from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError
+from dotenv import load_dotenv
+from fastmcp import Context, FastMCP
 from pydantic import ValidationError
 from tqdm import tqdm
 
@@ -61,6 +65,8 @@ from src.discovera_fastmcp.pydantic import (
     StorageGetInput,
     StorageListInput,
 )
+
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -191,6 +197,78 @@ Provide a compact table:
 # =========================
 STORAGE_INDEX_PATH = os.path.join("output", "storage_index.json")
 
+# S3 configuration (optional)
+S3_BUCKET = os.getenv("OUTPUTS_S3_BUCKET")
+S3_PREFIX = os.getenv("OUTPUTS_S3_PREFIX", "outputs")
+S3_REGION = os.getenv("AWS_REGION", "us-east-2")
+S3_PRESIGN_TTL = int(os.getenv("S3_PRESIGN_TTL_SECONDS", "604800"))  # 7 days
+_S3_CLIENT = None
+
+
+def _get_s3():
+    global _S3_CLIENT
+    if _S3_CLIENT is not None:
+        return _S3_CLIENT
+    if not S3_BUCKET:
+        return None
+    try:
+        _S3_CLIENT = boto3.client(
+            "s3",
+            region_name=S3_REGION,
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+            config=BotoConfig(
+                signature_version="s3v4", s3={"addressing_style": "virtual"}
+            ),
+        )
+        return _S3_CLIENT
+    except Exception:
+        return None
+
+
+def _s3_upload_and_presign(abs_path: str) -> dict | None:
+    try:
+        s3 = _get_s3()
+        if not s3 or not S3_BUCKET:
+            return None
+        if not os.path.exists(abs_path):
+            return None
+        # Detect content type from extension
+        ext = (os.path.splitext(abs_path)[1] or "").lower()
+        if ext == ".csv":
+            content_type = "text/csv"
+        elif ext == ".txt":
+            content_type = "text/plain"
+        elif ext == ".json":
+            content_type = "application/json"
+        elif ext == ".png":
+            content_type = "image/png"
+        elif ext == ".svg":
+            content_type = "image/svg+xml"
+        else:
+            content_type = "application/octet-stream"
+
+        # Build key with date + filename; prefix includes a date partition
+        today = datetime.now().strftime("%Y-%m-%d")
+        filename = os.path.basename(abs_path)
+        s3_key = f"{S3_PREFIX}/{today}/{filename}"
+        with open(abs_path, "rb") as f:
+            body = f.read()
+        s3.put_object(Bucket=S3_BUCKET, Key=s3_key, Body=body, ContentType=content_type)
+        url = s3.generate_presigned_url(
+            "get_object",
+            Params={
+                "Bucket": S3_BUCKET,
+                "Key": s3_key,
+                "ResponseContentDisposition": "inline",
+            },
+            ExpiresIn=S3_PRESIGN_TTL,
+        )
+        return {"s3_key": s3_key, "s3_presigned_url": url}
+    except (BotoCoreError, NoCredentialsError, ClientError, Exception):
+        return None
+
+
 # Global CPU-bound worker pool for true parallelism
 CPU_POOL = ProcessPoolExecutor()
 
@@ -260,6 +338,15 @@ def _register_file(
         "tags": tags or [],
         "metadata": metadata or {},
     }
+
+    # Optionally upload to S3 and attach presigned URL
+    try:
+        s3_info = _s3_upload_and_presign(abs_path)
+        if s3_info:
+            entry["s3_key"] = s3_info.get("s3_key")
+            entry["s3_presigned_url"] = s3_info.get("s3_presigned_url")
+    except Exception:
+        pass
 
     entries = _load_storage_index()
     # Replace if same path exists
