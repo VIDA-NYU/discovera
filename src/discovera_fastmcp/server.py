@@ -12,15 +12,17 @@ import json
 import logging
 import os
 import traceback
-from concurrent.futures import ThreadPoolExecutor
+import asyncio
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from datetime import datetime
 from itertools import combinations
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
+import functools
 
 import pandas as pd
 import requests
-from fastmcp import FastMCP
+from fastmcp import FastMCP, Context
 from pydantic import ValidationError
 from tqdm import tqdm
 
@@ -62,7 +64,7 @@ from src.discovera_fastmcp.pydantic import (
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("discovera_fastmcp")
 
 server_instructions = """
 You are an expert in biomedical research, focusing on mutation effects, treatment responses,
@@ -188,6 +190,9 @@ Provide a compact table:
 # Local storage helpers
 # =========================
 STORAGE_INDEX_PATH = os.path.join("output", "storage_index.json")
+
+# Global CPU-bound worker pool for true parallelism
+CPU_POOL = ProcessPoolExecutor()
 
 
 def _ensure_dir(path: str) -> None:
@@ -425,6 +430,72 @@ def _limit_dataframe_rows(
         return df
 
 
+# =========================
+# Keep-alive (SSE heartbeat) helpers
+# =========================
+async def _try_send_keepalive(
+    ctx: Context, event_name: str = "ping", data: Optional[Dict[str, Any]] = None
+) -> None:
+    """Attempt to send a lightweight keep-alive over SSE if supported by FastMCP.
+
+    This function checks for common streaming hooks. If none are available,
+    it safely no-ops to avoid breaking the server.
+    """
+    try:
+        if hasattr(ctx, "report_progress"):
+            print(f"Sending keepalive to {event_name}")
+            await ctx.report_progress(50, 100, "Working on the task...")
+            return
+        # Prefer a generic event emitter if available
+        if hasattr(ctx, "emit") and callable(getattr(ctx, "emit")):
+            print(f"Sending keepalive to {event_name}")
+            payload = data or {"ts": datetime.now().isoformat()}
+            await ctx.emit(event_name, payload)
+            return
+        # Fallback: explicit keepalive if exposed
+        if hasattr(ctx, "send_keepalive") and callable(getattr(ctx, "send_keepalive")):
+            print(f"Sending keepalive to {event_name}")
+            await ctx.send_keepalive()
+            return
+        # If we got here, no supported keepalive hook exists on this FastMCP instance
+        print(f"No keepalive hook available; event={event_name} no-op")
+    except Exception:
+        print(f"Error sending keepalive to {event_name}")
+        # Best-effort: swallow errors so keepalive never crashes user tasks
+        pass
+
+
+def start_keepalive(
+    ctx: Context, interval_seconds: float = 10.0, event_name: str = "ping"
+) -> asyncio.Task:
+    """Start a background heartbeat that periodically sends SSE keep-alive.
+
+    Returns an asyncio.Task; cancel it when the long-running job completes.
+    Usage:
+        task = start_keepalive(mcp, 5.0)
+        try:
+            ... long running work ...
+        finally:
+            task.cancel()
+    """
+
+    async def _heartbeat_loop() -> None:
+        logger.info(
+            "Keepalive started: event=%s interval=%.2fs",
+            event_name,
+            float(interval_seconds),
+        )
+        try:
+            while True:
+                await _try_send_keepalive(ctx, event_name)
+                await asyncio.sleep(max(0.5, float(interval_seconds)))
+        except asyncio.CancelledError:
+            logger.info("Keepalive cancelled: event=%s", event_name)
+            raise
+
+    return asyncio.create_task(_heartbeat_loop(), name=f"keepalive-{event_name}")
+
+
 def _truncate_dataframe_columns(
     df: pd.DataFrame,
     columns: list[str] | None = None,
@@ -445,7 +516,7 @@ def create_server():
     mcp = FastMCP(
         name="discovera_fastmcp",
         # instructions=server_instructions,
-        stateless_http=True,
+        stateless_http=False,
     )
 
     def _coalesce_none_defaults(model_obj: Any) -> Any:
@@ -522,8 +593,9 @@ def create_server():
         except Exception:
             return df
 
-    @mcp.tool()
+    @mcp.tool
     async def run_deseq2_gsea_pipe(
+        ctx: Context,
         raw_counts_csv_id: str,
         sample_groups: Optional[Dict[str, List[str]]] = None,
         gene_column: Optional[str] = None,
@@ -538,7 +610,8 @@ def create_server():
         - Input: a raw counts matrix (genes × samples) and a mapping of samples to groups.
         - Step 1 (DE): Runs DESeq2 to compute per-gene log2FoldChange and adjusted p-values (padj).
         - Step 2 (GSEA): Ranks genes by log2FoldChange and runs preranked GSEA across the selected libraries.
-        - Output: Top GSEA results in the immediate response + storage IDs for full DESeq2 and GSEA result tables (use CSV tools to fetch all rows).
+        - Output: Top GSEA results in the immediate response + storage IDs for full
+          DESeq2 and GSEA result tables (use CSV tools to fetch all rows).
 
         Args:
             raw_counts_csv_id (str):
@@ -553,7 +626,8 @@ def create_server():
                     "DMSO": ["7_1", "7_2", "7_3"],
                 }
             gene_column (str, optional):
-                Column name in the raw counts CSV that contains gene identifiers. Defaults to the first non-sample column.
+                Column name in the raw counts CSV that contains gene identifiers.
+                Defaults to the first non-sample column.
             gene_sets (Optional[List[str]]):
                 Gene set libraries for GSEA. Defaults to:
                 ["KEGG_2016", "GO_Biological_Process_2023", "Reactome_Pathways_2024", "MSigDB_Hallmark_2020"].
@@ -639,16 +713,27 @@ def create_server():
                 kept_cols = [gene_col] + [c for c in sample_cols]
                 raw_counts_df = raw_counts_df[kept_cols]
 
-            # Run DESeq2
-            de_results = run_deseq2(
-                raw_counts=raw_counts_df,
-                sample_conditions=sample_meta_df,
-                gene_column=params.gene_column,
-                sample_column=sample_col_name,
-                group_column=group_col_name,
+            # start sending heartbeat
+            heartbeat_task = start_keepalive(ctx, 5.0)
+
+            # Run DESeq2 in a process to achieve true parallelism (CPU-bound)
+            de_results = await asyncio.get_running_loop().run_in_executor(
+                CPU_POOL,
+                functools.partial(
+                    run_deseq2,
+                    raw_counts_df,
+                    sample_meta_df,
+                    params.gene_column,
+                    sample_col_name,
+                    group_col_name,
+                ),
             )
+
+            # cancel heartbeat
+            heartbeat_task.cancel()
+
             # Save DESeq2 results and register
-            de_entry = _save_dataframe_csv(
+            _save_dataframe_csv(
                 de_results,
                 name="deseq2_results",
                 origin_tool="run_deseq2_gsea_pipe",
@@ -663,16 +748,27 @@ def create_server():
             )
             # Run GSEA directly using helper to avoid calling MCP tool from inside server
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            gsea_df = rank_gsea(
-                dataset=de_results,
-                gene_sets=params.gene_sets,
-                hit_col="GeneID",
-                corr_col="log2FoldChange",
-                min_size=5,
-                max_size=200,
-                threshold=params.threshold,
-                timestamp=timestamp,
+
+            # start sending heartbeat
+            heartbeat_task = start_keepalive(ctx, 5.0)
+
+            gsea_df = await asyncio.get_running_loop().run_in_executor(
+                CPU_POOL,
+                functools.partial(
+                    rank_gsea,
+                    dataset=de_results,
+                    gene_sets=params.gene_sets,
+                    hit_col="GeneID",
+                    corr_col="log2FoldChange",
+                    min_size=5,
+                    max_size=200,
+                    threshold=params.threshold,
+                    timestamp=timestamp,
+                ),
             )
+
+            # cancel heartbeat
+            heartbeat_task.cancel()
 
             if isinstance(gsea_df, dict):
                 gsea_df = pd.DataFrame(gsea_df)
@@ -949,8 +1045,9 @@ def create_server():
         grouped_df = _limit_dataframe_rows(grouped_df, MAX_ROWS_DEFAULT)
         return grouped_df.to_dict()
 
-    @mcp.tool()
+    @mcp.tool
     async def gsea_pipe(
+        ctx: Context,
         csv_id: str,
         hit_col: str = "hit",
         corr_col: str = "corr",
@@ -1043,16 +1140,28 @@ def create_server():
 
             # Use the newer rank_gsea which auto-maps IDs and filters by p/q thresholds
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            sorted_results = rank_gsea(
-                dataset=dataset_df,
-                gene_sets=params.gene_sets,
-                hit_col=params.hit_col,
-                corr_col=params.corr_col,
-                min_size=params.min_size,
-                max_size=params.max_size,
-                threshold=params.threshold,
-                timestamp=timestamp,
+
+            # start sending heartbeat
+            print("FastMCP has emit?", hasattr(ctx, "emit"))
+            heartbeat_task = start_keepalive(ctx, 5.0)
+
+            sorted_results = await asyncio.get_running_loop().run_in_executor(
+                CPU_POOL,
+                functools.partial(
+                    rank_gsea,
+                    dataset=dataset_df,
+                    gene_sets=params.gene_sets,
+                    hit_col=params.hit_col,
+                    corr_col=params.corr_col,
+                    min_size=params.min_size,
+                    max_size=params.max_size,
+                    threshold=params.threshold,
+                    timestamp=timestamp,
+                ),
             )
+
+            # cancel heartbeat
+            heartbeat_task.cancel()
 
             if isinstance(sorted_results, dict):
                 # Safety: in case rank_gsea returns a dict unexpectedly
@@ -1172,8 +1281,9 @@ def create_server():
             }
             return _exception_payload("gsea_pipe", e, context)
 
-    @mcp.tool()
+    @mcp.tool
     async def ora_pipe(
+        ctx: Context,
         csv_id: str,
         gene_col: str = "gene",
         gene_sets: Optional[List[str]] = None,
@@ -1225,13 +1335,23 @@ def create_server():
                 raise ValueError(f"Column '{gene_col}' not found in CSV")
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            ora_results = nrank_ora(
-                dataset=df_genes,
-                gene_sets=params.gene_sets,
-                gene_col=gene_col,
-                # organism="human",
-                timestamp=timestamp,
+
+            # start sending heartbeat
+            heartbeat_task = start_keepalive(ctx, 5.0)
+
+            ora_results = await asyncio.get_running_loop().run_in_executor(
+                CPU_POOL,
+                functools.partial(
+                    nrank_ora,
+                    dataset=df_genes,
+                    gene_sets=params.gene_sets,
+                    gene_col=gene_col,
+                    timestamp=timestamp,
+                ),
             )
+
+            # cancel heartbeat
+            heartbeat_task.cancel()
 
             if isinstance(ora_results, dict):
                 ora_results = pd.DataFrame(ora_results)
