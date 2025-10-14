@@ -410,7 +410,7 @@ Optional subset of columns to keep in the output.
 Optional columns to sort by (prefix with '-' for descending).
 """,
     )
-    drop_duplicates: Optional[bool] = Field(
+    distinct: Optional[bool] = Field(
         default=False,
         description="""
 Whether to drop duplicate rows after filtering.

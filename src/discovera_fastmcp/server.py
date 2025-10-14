@@ -2107,7 +2107,7 @@ def create_server():
         conditions: List[Dict[str, Any]],
         keep_columns: Optional[List[str]] = None,
         sort_by: Optional[List[str]] = None,
-        drop_duplicates: Optional[bool] = None,
+        distinct: Optional[bool] = None,
         name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -2124,7 +2124,7 @@ def create_server():
             keep_columns (Optional[List[str]]): Optional subset of columns to keep in the output.
             sort_by (Optional[List[str]]): Optional sort keys. Prefix with '-' for descending
                 (e.g., ["-padj", "log2fc"]). Non-existing columns are ignored.
-            drop_duplicates (Optional[bool]): If true, drops duplicate rows after filtering.
+            distinct (Optional[bool]): If true, drops duplicate rows after filtering.
             name (Optional[str]): Logical name for the output CSV; if not provided an auto name is used.
 
         Returns:
@@ -2137,7 +2137,7 @@ def create_server():
                     "conditions": conditions,
                     "keep_columns": keep_columns,
                     "sort_by": sort_by,
-                    "drop_duplicates": drop_duplicates,
+                    "distinct": distinct,
                     "name": name,
                 },
                 CsvFilterInput,
@@ -2201,7 +2201,7 @@ def create_server():
                 existing = [c for c in params.keep_columns if c in filtered.columns]
                 if existing:
                     filtered = filtered[existing]
-            if params.drop_duplicates:
+            if params.distinct:
                 filtered = filtered.drop_duplicates()
             if params.sort_by:
                 filtered = _apply_sort(filtered, params.sort_by)

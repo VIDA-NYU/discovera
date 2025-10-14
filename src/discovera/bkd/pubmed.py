@@ -8,8 +8,6 @@ import requests
 import random
 import os
 
-from IPython.display import display, Image
-
 
 def search_pubmed(term: str, email: str):
     """Perform initial PubMed search and return metadata needed for batching."""
@@ -55,7 +53,6 @@ def fetch_pubmed_articles(webenv: str, query_key: str, total_count: int, batch_s
     return year_to_ids, all_years
 
 
-
 def plot_publication_timeline(years: list[int], term: str, figsize: tuple = (12, 6)):
     """Plot the timeline of publication counts per year using a bar plot, with all years on X-axis."""
     if not years:
@@ -66,6 +63,7 @@ def plot_publication_timeline(years: list[int], term: str, figsize: tuple = (12,
     sorted_years = sorted(counts)
     frequencies = [counts[y] for y in sorted_years]
 
+    plt.ioff()
     fig, ax = plt.subplots(figsize=figsize)
     ax.bar(sorted_years, frequencies, width=0.8)
 
@@ -81,9 +79,11 @@ def plot_publication_timeline(years: list[int], term: str, figsize: tuple = (12,
 
     ax.grid(True, axis='y', linestyle='--', alpha=0.7)
     plt.tight_layout()
-    # plt.show()
-    # display(fig)
-    return fig
+    filename = f"{term.replace(' ', '_')}_timeline.png"
+    save_path = os.path.join(".", filename)  # Beaker userfiles folder
+    fig.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    return save_path
 
 
 def literature_timeline(term: str, email: str, batch_size: int = 500, figsize: tuple = (12, 6)):
@@ -103,14 +103,10 @@ def literature_timeline(term: str, email: str, batch_size: int = 500, figsize: t
         year: [f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" for pmid in pmids]
         for year, pmids in year_to_ids.items()
     }
-    # fig = plot_publication_timeline(pub_years, term, figsize)
-    # # Save figure in Beaker environment
-    # filename = f"{term.replace(' ', '_')}_timeline.png"
-    # save_path = os.path.join(".", filename)  # Beaker userfiles folder
-    # fig.savefig(save_path, dpi=300, bbox_inches='tight')
+    save_path = plot_publication_timeline(pub_years, term, figsize)
 
-    # print(f"Figure saved to Beaker environment: {save_path}")
-    return year_to_ids, None
+    print(f"Figure saved to Beaker environment: {save_path}")
+    return year_to_ids, save_path
 
 
 def search_pubmed_count(query: str, email: str = "test@example.com") -> int:

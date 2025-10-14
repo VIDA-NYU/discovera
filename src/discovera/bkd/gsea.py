@@ -75,6 +75,7 @@ def plot_gsea_results(
     databases = df[db_col].unique()
     n_db = len(databases)
 
+    plt.ioff()
     fig, axes = plt.subplots(n_db, 1, figsize=(8, 4 * n_db), sharex=True)
     if n_db == 1:
         axes = [axes]
@@ -111,7 +112,8 @@ def plot_gsea_results(
         outpath = os.path.join(folder, f"gsea_results_{timestamp}.png")
         plt.savefig(outpath, dpi=300, bbox_inches='tight')
         print(f"Plot saved: {outpath}")
-    # plt.show()
+
+    plt.close()
     return fig
 
 # =========================
@@ -513,11 +515,11 @@ def rank_gsea(dataset, gene_sets, hit_col, corr_col,
     print(f"Number of matching results with p-val < {threshold}: {len(results_df)}")
 
     sorted_results = results_df.sort_values(by="NES", ascending=False)
-    # top_low_nes = sorted_results.head(10)
-    # top_high_nes = sorted_results.tail(10)
-    # top_combined = pd.concat([top_high_nes, top_low_nes]).drop_duplicates()
+    top_low_nes = sorted_results.head(10)
+    top_high_nes = sorted_results.tail(10)
+    top_combined = pd.concat([top_high_nes, top_low_nes]).drop_duplicates()
 
-    # plot_gsea_results(top_combined, timestamp)
+    plot_gsea_results(top_combined, timestamp)
     return sorted_results
 
 
