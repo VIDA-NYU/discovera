@@ -1,12 +1,12 @@
-import matplotlib.pyplot as plt
-from matplotlib.ticker import MaxNLocator
-from collections import Counter
-from Bio import Entrez
-import pandas as pd
-from collections import defaultdict
-import requests
-import random
 import os
+import random
+from collections import Counter, defaultdict
+
+import matplotlib.pyplot as plt
+import pandas as pd
+import requests
+from Bio import Entrez
+from matplotlib.ticker import MaxNLocator
 
 
 def search_pubmed(term: str, email: str):
@@ -22,7 +22,9 @@ def search_pubmed(term: str, email: str):
     return record["WebEnv"], record["QueryKey"], total_count
 
 
-def fetch_pubmed_articles(webenv: str, query_key: str, total_count: int, batch_size: int = 500):
+def fetch_pubmed_articles(
+    webenv: str, query_key: str, total_count: int, batch_size: int = 500
+):
     """
     Fetch article publication years and their PMIDs (or PMCIDs if available), grouped by year.
 
@@ -32,10 +34,15 @@ def fetch_pubmed_articles(webenv: str, query_key: str, total_count: int, batch_s
     """
     year_to_ids = {}
     for start in range(0, total_count, batch_size):
-        print(f"Fetching articles {start + 1} to {min(start + batch_size, total_count)}...")
+        print(
+            f"Fetching articles {start + 1} to {min(start + batch_size, total_count)}..."
+        )
         with Entrez.esummary(
-            db="pubmed", query_key=query_key, WebEnv=webenv,
-            retstart=start, retmax=batch_size
+            db="pubmed",
+            query_key=query_key,
+            WebEnv=webenv,
+            retstart=start,
+            retmax=batch_size,
         ) as handle:
             records = Entrez.read(handle)
 
@@ -75,18 +82,20 @@ def plot_publication_timeline(years: list[int], term: str, figsize: tuple = (12,
     # Force integer ticks on both axes
     ax.yaxis.set_major_locator(MaxNLocator(integer=True))
     ax.set_xticks(sorted_years)  # Show all years
-    ax.set_xticklabels(sorted_years, rotation=45, ha='right')  # Rotate for readability
+    ax.set_xticklabels(sorted_years, rotation=45, ha="right")  # Rotate for readability
 
-    ax.grid(True, axis='y', linestyle='--', alpha=0.7)
+    ax.grid(True, axis="y", linestyle="--", alpha=0.7)
     plt.tight_layout()
     filename = f"{term.replace(' ', '_')}_timeline.png"
     save_path = os.path.join(".", filename)  # Beaker userfiles folder
-    fig.savefig(save_path, dpi=300, bbox_inches='tight')
+    fig.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.close()
     return save_path
 
 
-def literature_timeline(term: str, email: str, batch_size: int = 500, figsize: tuple = (12, 6)):
+def literature_timeline(
+    term: str, email: str, batch_size: int = 500, figsize: tuple = (12, 6)
+):
     """
     Main function to search, fetch, and plot publication timeline.
 
@@ -98,7 +107,9 @@ def literature_timeline(term: str, email: str, batch_size: int = 500, figsize: t
         return None, {}
 
     print(f"Total articles found: {total_count}")
-    year_to_ids, pub_years = fetch_pubmed_articles(webenv, query_key, total_count, batch_size)
+    year_to_ids, pub_years = fetch_pubmed_articles(
+        webenv, query_key, total_count, batch_size
+    )
     year_to_ids = {
         year: [f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" for pmid in pmids]
         for year, pmids in year_to_ids.items()
@@ -117,7 +128,7 @@ def search_pubmed_count(query: str, email: str = "test@example.com") -> int:
         "term": query,
         "retmode": "json",
         "retmax": 0,
-        "email": email
+        "email": email,
     }
     r = requests.get(url, params=params)
     try:
@@ -127,9 +138,7 @@ def search_pubmed_count(query: str, email: str = "test@example.com") -> int:
 
 
 def prioritize_genes(
-    gene_list: str,
-    context_term: str,
-    email: str = "test@example.com"
+    gene_list: str, context_term: str, email: str = "test@example.com"
 ) -> str:
     """
     Prioritize genes in context of disease or phenotype.
@@ -157,9 +166,9 @@ def prioritize_genes(
 
         # Composite: simple weighted sum
         composite = (
-            0.5 * scores[gene]["centrality"] +
-            0.3 * (1 if pubmed_count > 0 else 0) +
-            0.2 * scores[gene]["disease_score"]
+            0.5 * scores[gene]["centrality"]
+            + 0.3 * (1 if pubmed_count > 0 else 0)
+            + 0.2 * scores[gene]["disease_score"]
         )
         scores[gene]["composite"] = round(composite, 3)
 

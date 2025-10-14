@@ -1,21 +1,21 @@
-import gseapy as gp
-import pandas as pd
-import matplotlib.pyplot as plt
+import functools
 import os
-import mygene
+import pickle
 import re
 import time
-import pickle
-import functools
 import warnings
-
-from gseapy import GSEA
-from pydeseq2.dds import DeseqDataSet
-from pydeseq2.ds import DeseqStats
-from pydeseq2.default_inference import DefaultInference
-from rapidfuzz import process
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+
+import gseapy as gp
+import matplotlib.pyplot as plt
+import mygene
+import pandas as pd
+from gseapy import GSEA
+from pydeseq2.dds import DeseqDataSet
+from pydeseq2.default_inference import DefaultInference
+from pydeseq2.ds import DeseqStats
+from rapidfuzz import process
 
 # =========================
 # Utility helpers
@@ -44,12 +44,13 @@ def save_with_timestamp(df, prefix, timestamp, ext="csv", folder="output"):
 def pval_to_stars(p):
     """Convert p-value to significance stars."""
     if p < 0.001:
-        return '***'
+        return "***"
     elif p < 0.01:
-        return '**'
+        return "**"
     elif p < 0.05:
-        return '*'
-    return ''
+        return "*"
+    return ""
+
 
 # =========================
 # Plotting
@@ -57,20 +58,20 @@ def pval_to_stars(p):
 
 
 def plot_gsea_results(
-        df,
-        timestamp=get_timestamp(),
-        nes_col='NES',
-        pval_col='FDR q-val',
-        pathway_col='Pathway',
-        db_col='Data Base',
-        save=True,
-        folder="output",
+    df,
+    timestamp=get_timestamp(),
+    nes_col="NES",
+    pval_col="FDR q-val",
+    pathway_col="Pathway",
+    db_col="Data Base",
+    save=True,
+    folder="output",
 ):
     """
     Plot GSEA results with NES values and significance stars for multiple databases.
     """
     df = df.copy()
-    df['stars'] = df[pval_col].apply(pval_to_stars)
+    df["stars"] = df[pval_col].apply(pval_to_stars)
 
     databases = df[db_col].unique()
     n_db = len(databases)
@@ -85,40 +86,42 @@ def plot_gsea_results(
         bars = ax.barh(
             df_db[pathway_col],
             df_db[nes_col],
-            color=['#d73027' if x < 0 else '#4575b4' for x in df_db[nes_col]]
+            color=["#d73027" if x < 0 else "#4575b4" for x in df_db[nes_col]],
         )
         # Add stars
-        for bar, star in zip(bars, df_db['stars']):
+        for bar, star in zip(bars, df_db["stars"]):
             if star:
                 width = bar.get_width()
                 ax.text(
                     width + 0.05 if width > 0 else width - 0.05,
-                    bar.get_y() + bar.get_height()/2,
+                    bar.get_y() + bar.get_height() / 2,
                     star,
-                    va='center',
-                    ha='left' if width > 0 else 'right',
+                    va="center",
+                    ha="left" if width > 0 else "right",
                     fontsize=12,
-                    fontweight='bold'
+                    fontweight="bold",
                 )
-        ax.axvline(0, color='grey', linestyle='--')
-        ax.set_ylabel('Pathway')
-        ax.set_title(f'{db} Pathways')
+        ax.axvline(0, color="grey", linestyle="--")
+        ax.set_ylabel("Pathway")
+        ax.set_title(f"{db} Pathways")
 
-    axes[-1].set_xlabel('Normalized Enrichment Score (NES)')
+    axes[-1].set_xlabel("Normalized Enrichment Score (NES)")
     plt.tight_layout()
 
     if save:
         ensure_output_dir(folder)
         outpath = os.path.join(folder, f"gsea_results_{timestamp}.png")
-        plt.savefig(outpath, dpi=300, bbox_inches='tight')
+        plt.savefig(outpath, dpi=300, bbox_inches="tight")
         print(f"Plot saved: {outpath}")
 
     plt.close()
     return fig
 
+
 # =========================
 # Analysis functions
 # =========================
+
 
 @functools.lru_cache(maxsize=1)
 def get_valid_hgnc_symbols():
@@ -153,17 +156,13 @@ def detect_id_type(ids):
         "ensembl.gene.human": re.compile(r"^ENSG\d+"),
         "ensembl.transcript.human": re.compile(r"^ENST\d+"),
         "ensembl.protein.human": re.compile(r"^ENSP\d+"),
-
         "ensembl.gene.mouse": re.compile(r"^ENSMUSG\d+"),
         "ensembl.transcript.mouse": re.compile(r"^ENSMUST\d+"),
         "ensembl.protein.mouse": re.compile(r"^ENSMUSP\d+"),
-
         "entrezgene": re.compile(r"^\d+$"),
-
         "refseq.human": re.compile(r"^(NM_|NR_)\d+"),
         "refseq.mouse": re.compile(r"^(XM_|XR_)\d+"),
-
-        "uniprot": re.compile(r"^[A-NR-Z][0-9][A-Z0-9]{3,}")  # broad UniProt
+        "uniprot": re.compile(r"^[A-NR-Z][0-9][A-Z0-9]{3,}"),  # broad UniProt
     }
 
     matched_types = set()
@@ -207,7 +206,7 @@ def map_to_symbol(df, gene_col, cache_file=None):
 
     def chunks(lst, n):
         for i in range(0, len(lst), n):
-            yield lst[i:i + n]
+            yield lst[i : i + n]
 
     def fetch_chunk(id_chunk):
         results = []
@@ -226,7 +225,7 @@ def map_to_symbol(df, gene_col, cache_file=None):
                 scopes=possible_scopes,
                 fields=fields,
                 species=species,
-                as_dataframe=True
+                as_dataframe=True,
             ).reset_index()
 
             for _, row in res.iterrows():
@@ -251,7 +250,9 @@ def map_to_symbol(df, gene_col, cache_file=None):
     results = []
     id_chunks = list(chunks(unique_ids, chunk_size))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_idx = {executor.submit(fetch_chunk, c): idx for idx, c in enumerate(id_chunks)}
+        future_to_idx = {
+            executor.submit(fetch_chunk, c): idx for idx, c in enumerate(id_chunks)
+        }
         for future in as_completed(future_to_idx):
             df_chunk = future.result()
             if isinstance(df_chunk, pd.DataFrame) and not df_chunk.empty:
@@ -268,8 +269,12 @@ def map_to_symbol(df, gene_col, cache_file=None):
 
     # Merge with cache
     if cache:
-        cached_df = pd.DataFrame([{"query": k, "human_symbol": v} for k, v in cache.items()])
-        mapping = pd.concat([mapping, cached_df], ignore_index=True).drop_duplicates(subset="query")
+        cached_df = pd.DataFrame(
+            [{"query": k, "human_symbol": v} for k, v in cache.items()]
+        )
+        mapping = pd.concat([mapping, cached_df], ignore_index=True).drop_duplicates(
+            subset="query"
+        )
 
     # Update cache
     if cache_file:
@@ -278,11 +283,14 @@ def map_to_symbol(df, gene_col, cache_file=None):
             pickle.dump(cache_dict, f)
 
     # Merge back with original DataFrame
-    df_merged = df.merge(mapping, left_on=gene_col, right_on="query", how="left").drop(columns=["query"])
+    df_merged = df.merge(mapping, left_on=gene_col, right_on="query", how="left").drop(
+        columns=["query"]
+    )
     df_merged.rename(columns={"human_symbol": "symbol"}, inplace=True)
     df_merged["symbol"] = df_merged["symbol"].str.upper()
 
     return df_merged
+
 
 def prepare_gene_symbols(df, gene_col):
     """
@@ -298,16 +306,19 @@ def prepare_gene_symbols(df, gene_col):
     if fraction_valid >= 0.9:  # if most IDs are valid human symbols, skip mapping
         df = df.copy()
         df["symbol"] = input_ids
-        print(f"Skipping mapping: {n_valid}/{len(input_ids)} IDs are valid human symbols.")
+        print(
+            f"Skipping mapping: {n_valid}/{len(input_ids)} IDs are valid human symbols."
+        )
     else:
         df = map_to_symbol(df, gene_col)
         print(f"Mapping performed: {len(df)} IDs mapped to human symbols.")
 
     # Filter against HGNC
     df = df[df["symbol"].isin(valid_symbols)].copy()
-    df = df.drop(columns=[gene_col], errors='ignore')
+    df = df.drop(columns=[gene_col], errors="ignore")
     df[gene_col] = df["symbol"]
     return df
+
 
 def fuzzy_rename_column(df, column, reference_values, threshold=50):
     """
@@ -333,18 +344,23 @@ def fuzzy_rename_column(df, column, reference_values, threshold=50):
     return df
 
 
-def run_deseq2(raw_counts, sample_conditions, gene_column="Unnamed: 0", 
-               sample_column="SampleID", group_column="Group"):
+def run_deseq2(
+    raw_counts,
+    sample_conditions,
+    gene_column="Unnamed: 0",
+    sample_column="SampleID",
+    group_column="Group",
+):
     """
     Full DESeq2 workflow (preprocessing step for downstream GSEA):
 
-    This function performs preprocessing and differential expression analysis 
-    on RNA-seq count data using **DESeq2**, a widely used method for identifying 
-    differentially expressed genes. DESeq2 models raw counts using a negative 
-    binomial distribution and performs statistical testing while accounting 
+    This function performs preprocessing and differential expression analysis
+    on RNA-seq count data using **DESeq2**, a widely used method for identifying
+    differentially expressed genes. DESeq2 models raw counts using a negative
+    binomial distribution and performs statistical testing while accounting
     for differences in sequencing depth and biological variability.
 
-    The workflow generates a tidy results table suitable for downstream analyses, 
+    The workflow generates a tidy results table suitable for downstream analyses,
     including **Gene Set Enrichment Analysis (GSEA)**.
 
     Parameters:
@@ -361,7 +377,7 @@ def run_deseq2(raw_counts, sample_conditions, gene_column="Unnamed: 0",
             - Column sample_column: sample identifiers (may require fuzzy matching)
             - Column group_column: experimental group or condition
         Dataset after processing:
-            - `sample_conditions`: samples × group labels, with sample IDs aligned 
+            - `sample_conditions`: samples × group labels, with sample IDs aligned
               to counts columns
     - gene_column: name of the column in raw_counts with gene identifiers
     - sample_column: name of the column in sample_conditions with sample IDs
@@ -385,7 +401,7 @@ def run_deseq2(raw_counts, sample_conditions, gene_column="Unnamed: 0",
         - One row per gene
         - Columns include:
             - 'GeneID': the gene identifier (originally from the counts file)
-            - 'log2FoldChange': estimated log2 fold change of expression between 
+            - 'log2FoldChange': estimated log2 fold change of expression between
               the tested group and reference group
             - 'lfcSE': standard error of the log2 fold change
             - 'stat': Wald test statistic
@@ -395,10 +411,10 @@ def run_deseq2(raw_counts, sample_conditions, gene_column="Unnamed: 0",
         - Index is reset (0..n-1), so 'GeneID' is a regular column, not the index
 
     Note:
-    - DESeq2 is a robust method for RNA-seq differential expression analysis 
+    - DESeq2 is a robust method for RNA-seq differential expression analysis
       that accounts for library size differences and biological variability.
-    - This function is primarily a **preprocessing step** for GSEA. 
-      The output `results_df` can be ranked by log2 fold change or other statistics 
+    - This function is primarily a **preprocessing step** for GSEA.
+      The output `results_df` can be ranked by log2 fold change or other statistics
       for enrichment analysis of gene sets.
     """
 
@@ -411,12 +427,15 @@ def run_deseq2(raw_counts, sample_conditions, gene_column="Unnamed: 0",
     # Filter lowly-expressed genes
     filter_counts = raw_counts[(raw_counts > 10).sum(axis=1) > 0]
 
-
     # sample_conditions:
     #   Column sample_column: sample IDs (to be matched with counts columns)
     #   Column group_column: experimental group (e.g., "DMSO", "Cisplatin")
-    sample_conditions = fuzzy_rename_column(sample_conditions, sample_column, list(filter_counts.columns))
-    sample_conditions = sample_conditions[[sample_column, group_column]].set_index(sample_column)
+    sample_conditions = fuzzy_rename_column(
+        sample_conditions, sample_column, list(filter_counts.columns)
+    )
+    sample_conditions = sample_conditions[[sample_column, group_column]].set_index(
+        sample_column
+    )
     sample_conditions[group_column] = pd.Categorical(sample_conditions[group_column])
 
     # --- Build DESeq2 dataset ---
@@ -425,9 +444,9 @@ def run_deseq2(raw_counts, sample_conditions, gene_column="Unnamed: 0",
     # Ensure metadata index order matches counts_t index
     sample_conditions = sample_conditions.loc[counts_t.index]
     dds = DeseqDataSet(
-        counts=counts_t,            # Transpose: DESeq expects samples as rows
-        metadata=sample_conditions, # Metadata must match rows of counts
-        design_factors=group_column
+        counts=counts_t,  # Transpose: DESeq expects samples as rows
+        metadata=sample_conditions,  # Metadata must match rows of counts
+        design_factors=group_column,
     )
 
     # --- Run normalization and dispersion estimation ---
@@ -445,11 +464,7 @@ def run_deseq2(raw_counts, sample_conditions, gene_column="Unnamed: 0",
     contrast = [group_column, tested_level, reference_level]
     print("Using contrast:", contrast)
 
-    stat_res = DeseqStats(
-        dds,
-        contrast=contrast,
-        inference=DefaultInference(n_cpus=4)
-    )
+    stat_res = DeseqStats(dds, contrast=contrast, inference=DefaultInference(n_cpus=4))
     stat_res.summary()
 
     results = stat_res.results_df.copy()
@@ -457,8 +472,17 @@ def run_deseq2(raw_counts, sample_conditions, gene_column="Unnamed: 0",
     results = results.reset_index()
     return results
 
-def rank_gsea(dataset, gene_sets, hit_col, corr_col,
-              min_size=5, max_size=200, threshold=0.05, timestamp=None):
+
+def rank_gsea(
+    dataset,
+    gene_sets,
+    hit_col,
+    corr_col,
+    min_size=5,
+    max_size=200,
+    threshold=0.05,
+    timestamp=None,
+):
     if timestamp is None:
         timestamp = get_timestamp()
 
@@ -472,7 +496,9 @@ def rank_gsea(dataset, gene_sets, hit_col, corr_col,
         warnings.warn("No valid human symbols found after mapping.")
         return pd.DataFrame()
 
-    data_sorted = dataset.sort_values(by=corr_col, ascending=False).reset_index(drop=True)
+    data_sorted = dataset.sort_values(by=corr_col, ascending=False).reset_index(
+        drop=True
+    )
     rnk_data = data_sorted[[hit_col, corr_col]].dropna()
 
     # Set index to hit_col
@@ -486,7 +512,7 @@ def rank_gsea(dataset, gene_sets, hit_col, corr_col,
             max_size=max_size,
             outdir=None,
             verbose=True,
-            threads=16
+            threads=16,
         )
     except Exception as e:
         print(f"GSEA prerank failed: {e}")
@@ -500,15 +526,19 @@ def rank_gsea(dataset, gene_sets, hit_col, corr_col,
     if not isinstance(gene_sets, (list, tuple)):
         gene_sets = [gene_sets]
     if len(gene_sets) >= 2:
-        results_df[['Data Base', 'Pathway']] = results_df['Term'].str.split('__', expand=True)
+        results_df[["Data Base", "Pathway"]] = results_df["Term"].str.split(
+            "__", expand=True
+        )
     else:
         if isinstance(gene_sets, list):
             gene_sets = gene_sets[0]  # strip the brackets
 
-        results_df['Pathway'] = results_df['Term']
-        results_df['Data Base'] = gene_sets
+        results_df["Pathway"] = results_df["Term"]
+        results_df["Data Base"] = gene_sets
 
-    pval_columns = [col for col in results_df.columns if "p-val" in col or "q-val" in col]
+    pval_columns = [
+        col for col in results_df.columns if "p-val" in col or "q-val" in col
+    ]
     results_df = results_df[results_df[pval_columns].lt(threshold).any(axis=1)]
 
     save_with_timestamp(results_df, "gsea_results", timestamp)
@@ -523,16 +553,24 @@ def rank_gsea(dataset, gene_sets, hit_col, corr_col,
     return sorted_results
 
 
-def classic_gsea(dataset, metadata, gene_sets, hit_col, group_column,
-                      pheno_pos, pheno_neg,
-                      permutation_type='gene_set',
-                      permutation_num=1000,
-                      method='signal_to_noise',
-                      threads=4, seed=8,
-                      threshold=0.05):
+def classic_gsea(
+    dataset,
+    metadata,
+    gene_sets,
+    hit_col,
+    group_column,
+    pheno_pos,
+    pheno_neg,
+    permutation_type="gene_set",
+    permutation_num=1000,
+    method="signal_to_noise",
+    threads=4,
+    seed=8,
+    threshold=0.05,
+):
     """
-    Run classic GSEA (Gene Set Enrichment Analysis) using raw expression data 
-    (not pre-ranked). This function maps gene identifiers, sets up the expression 
+    Run classic GSEA (Gene Set Enrichment Analysis) using raw expression data
+    (not pre-ranked). This function maps gene identifiers, sets up the expression
     matrix, and performs enrichment analysis for the specified phenotypes.
 
     Parameters:
@@ -576,7 +614,7 @@ def classic_gsea(dataset, metadata, gene_sets, hit_col, group_column,
         return pd.DataFrame()
 
     # Set index to processed gene symbol
-    dataset = dataset.set_index('symbol').drop(hit_col, axis=1)
+    dataset = dataset.set_index("symbol").drop(hit_col, axis=1)
 
     # Extract expression matrix for GSEA
     norm_counts = dataset.copy()
@@ -594,7 +632,7 @@ def classic_gsea(dataset, metadata, gene_sets, hit_col, group_column,
         outdir=None,
         method=method,
         threads=threads,
-        seed=seed
+        seed=seed,
     )
     gs.pheno_pos = pheno_pos
     gs.pheno_neg = pheno_neg
@@ -608,23 +646,23 @@ def classic_gsea(dataset, metadata, gene_sets, hit_col, group_column,
         gene_sets = [gene_sets]
 
     if len(gene_sets) >= 2:
-        results_df[['Data Base', 'Pathway']] = results_df['Term'].str.split('__', expand=True)
+        results_df[["Data Base", "Pathway"]] = results_df["Term"].str.split(
+            "__", expand=True
+        )
     else:
-        results_df['Pathway'] = results_df['Term']
-        results_df['Data Base'] = gene_sets[0]
+        results_df["Pathway"] = results_df["Term"]
+        results_df["Data Base"] = gene_sets[0]
 
-    pval_columns = [col for col in results_df.columns if "p-val" in col or "q-val" in col]
+    pval_columns = [
+        col for col in results_df.columns if "p-val" in col or "q-val" in col
+    ]
     results_df = results_df[results_df[pval_columns].lt(threshold).any(axis=1)]
     results_df = results_df.sort_values(by="NES", ascending=False)
 
     return results_df
 
-def nrank_ora(
-    dataset,
-    gene_sets,
-    gene_col,
-    timestamp=None
-):
+
+def nrank_ora(dataset, gene_sets, gene_col, timestamp=None):
     """
     Perform Enrichr enrichment analysis on a gene list.
     Automatically maps Ensembl/Entrez/RefSeq/UniProt IDs to symbols.
@@ -653,10 +691,7 @@ def nrank_ora(
     # --- Run Enrichr --
     try:
         enr = gp.enrichr(
-            gene_list=genes,
-            gene_sets=gene_sets,
-            outdir=None,
-            verbose=True
+            gene_list=genes, gene_sets=gene_sets, outdir=None, verbose=True
         )
     except Exception as e:
         print(f"ORA (Enrichr) failed: {e}")
@@ -674,5 +709,4 @@ def nrank_ora(
     filtered_results = results.head(20)
     print(f"Number of matching results: {len(filtered_results)}")
 
-    return  filtered_results
-
+    return filtered_results
