@@ -1,0 +1,5 @@
+# Dotenv files
+.env
+**/.env
+*.env
+**/*.env
