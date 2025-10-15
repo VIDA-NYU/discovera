@@ -3,10 +3,11 @@ import os
 import numpy as np
 import torch
 from sentence_transformers import SentenceTransformer, util
-from bert_score import score as bert_score
 from rouge_score import rouge_scorer
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
-
+from sklearn.metrics.pairwise import cosine_similarity
+from transformers import AutoTokenizer, AutoModel
+from tqdm import tqdm
 from plotnine import (
     ggplot, aes, geom_histogram, geom_vline, geom_boxplot, geom_jitter,
     geom_point, geom_abline, geom_text,
@@ -364,6 +365,7 @@ def traditional_similarity_metrics(
     input_path="../data/benchmark/benchmark.csv",
     output_dir="../../output/",
     sts_model="dmlls/all-mpnet-base-v2-negation",
+    biobert_model="microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract",
     ground_truth_col="Ground Truth",
     compare_cols=None
 ):
@@ -422,11 +424,52 @@ def traditional_similarity_metrics(
             emb = sts_model.encode(df[col], convert_to_tensor=True)
             df[f"STS_{col}_vs_{ground_truth_col}"] = util.cos_sim(emb, gt_emb).diagonal().cpu().numpy()
 
-        # --- BERTScore ---
-        #print(" Computing BERTScore (semantic precision/recall/F1)...")
-        #for col in compare_cols:
-        #    P, R, F = bert_score(df[col].tolist(), df[ground_truth_col].tolist(), lang="en", rescale_with_baseline=True)
-        #    df[f"BERTScore_F1_{col}"] = F
+
+        # --- 2. BioBERT (PubMedBERT) Semantic Similarity
+        print("Computing BioBERT-based Semantic Similarity...")
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        tokenizer = AutoTokenizer.from_pretrained(biobert_model)
+        model = AutoModel.from_pretrained(biobert_model).to(device)
+        model.eval()
+
+        def embed_long_texts(texts, tokenizer, model, device, max_len=512, stride=50, batch_size=4):
+            """Embed long texts using sliding windows and mean pooling."""
+            all_embeddings = []
+            for i in tqdm(range(0, len(texts), batch_size), desc="Batches"):
+                batch_texts = texts[i:i+batch_size]
+                batch_embeddings = []
+                for text in batch_texts:
+                    tokens = tokenizer.encode(text, add_special_tokens=True)
+                    embeddings = []
+                    start = 0
+                    while start < len(tokens):
+                        end = min(start + max_len, len(tokens))
+                        input_ids = torch.tensor([tokens[start:end]]).to(device)
+                        attention_mask = torch.ones_like(input_ids).to(device)
+                        with torch.no_grad():
+                            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+                            chunk_emb = outputs.last_hidden_state.mean(dim=1)
+                            embeddings.append(chunk_emb.cpu())
+                        if end == len(tokens):
+                            break
+                        start += max_len - stride
+                    text_emb = torch.mean(torch.stack(embeddings), dim=0)
+                    batch_embeddings.append(text_emb)
+                all_embeddings.append(torch.cat(batch_embeddings, dim=0))
+            return torch.cat(all_embeddings, dim=0).numpy()
+
+        print("Embedding Ground Truth...")
+        gt_embeddings = embed_long_texts(df[ground_truth_col].tolist(), tokenizer, model, device)
+
+        for col in compare_cols:
+            print(f"Embedding {col}...")
+            model_embeddings = embed_long_texts(df[col].tolist(), tokenizer, model, device)
+            sims = [
+                cosine_similarity(gt_embeddings[i].reshape(1, -1), model_embeddings[i].reshape(1, -1))[0][0]
+                for i in range(len(df))
+            ]
+            df[f"BioBERTScore_{col}_vs_{ground_truth_col}"] = sims
 
         # --- ROUGE-L (textual overlap) ---
         print("Computing ROUGE-L scores...")
@@ -459,15 +502,15 @@ def traditional_similarity_metrics(
             ]
         # "BERTScore_"
         # --- Step 4: Summary Statistics ---
-        metric_cols = [c for c in df.columns if any(k in c for k in ["STS_", "ROUGE_", "BLEU_"])]
+        metric_cols = [c for c in df.columns if any(k in c for k in ["STS_", "BioBERTScore_", "ROUGE_", "BLEU_"])]
         summary = df[metric_cols].describe().T.round(3)
 
         print("\n===Summary of Semantic & Biomedical Similarity ===")
         print(summary)
 
         # --- Save outputs ---
-        df.to_csv(os.path.join(output_dir, "semantic_similarity_results.csv"), index=False)
-        summary.to_csv(os.path.join(output_dir, "semantic_similarity_summary.csv"))
+        df.to_csv(os.path.join(output_dir, "sesmantic_similarity_pertask.csv"), index=False)
+        summary.to_csv(os.path.join(output_dir, "semantic_similarity_overall.csv"))
 
         print(f"\n Results saved to {output_dir}")
 
