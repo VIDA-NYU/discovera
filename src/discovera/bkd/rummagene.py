@@ -12,12 +12,13 @@ logger = logging.getLogger(__name__)
 GRAPHQL_URL = "https://rummagene.com/graphql"
 DEFAULT_HEADERS = {"Content-Type": "application/json"}
 
+
 def _post_graphql(
     query: str,
     variables: Dict,
     operation_name: str,
     url: str = GRAPHQL_URL,
-    headers: Optional[Dict] = None
+    headers: Optional[Dict] = None,
 ) -> dict:
     """
     Internal helper to send a GraphQL POST request.
@@ -33,16 +34,14 @@ def _post_graphql(
         dict: Parsed data from the response.
     """
     headers = headers or DEFAULT_HEADERS
-    payload = {
-        "operationName": operation_name,
-        "variables": variables,
-        "query": query
-    }
+    payload = {"operationName": operation_name, "variables": variables, "query": query}
 
     response = requests.post(url, headers=headers, json=payload)
 
     if not response.ok:
-        raise RuntimeError(f"GraphQL request failed: {response.status_code}\n{response.text}")
+        raise RuntimeError(
+            f"GraphQL request failed: {response.status_code}\n{response.text}"
+        )
 
     try:
         return response.json()["data"]
@@ -56,7 +55,7 @@ def enrich_query(
     offset: int = 0,
     first: int = 30,
     url: str = GRAPHQL_URL,
-    max_records: Optional[int] = None
+    max_records: Optional[int] = None,
 ) -> pd.DataFrame:
     """
     Run a gene enrichment analysis for a list of genes.
@@ -118,9 +117,14 @@ def enrich_query(
     while True:
         data = _post_graphql(
             query=query,
-            variables={"genes": genes, "filterTerm": filter_term, "offset": current_offset, "first": first},
+            variables={
+                "genes": genes,
+                "filterTerm": filter_term,
+                "offset": current_offset,
+                "first": first,
+            },
             operation_name="EnrichmentQuery",
-            url=url
+            url=url,
         )
 
         enrich_data = data["currentBackground"]["enrich"]
@@ -137,19 +141,25 @@ def enrich_query(
         for entry in enrichments:
             for gs in entry["geneSets"]["nodes"]:
                 pub_info = gs["geneSetPmcsById"]["nodes"]
-                pub = pub_info[0]["pmcInfoByPmcid"] if pub_info and pub_info[0].get("pmcInfoByPmcid") else None
-                all_rows.append({
-                    "Gene Set ID": gs["id"],
-                    "Term": gs["term"],
-                    "Description": gs["description"],
-                    "# Genes in Set": gs["nGeneIds"],
-                    "p-value": entry["pvalue"],
-                    "adj. p-value": entry["adjPvalue"],
-                    "Odds Ratio": entry["oddsRatio"],
-                    "# Overlap": entry["nOverlap"],
-                    "PubMed Title": pub.get("title") if pub else None,
-                    "PMCID": pub.get("pmcid") if pub else None
-                })
+                pub = (
+                    pub_info[0]["pmcInfoByPmcid"]
+                    if pub_info and pub_info[0].get("pmcInfoByPmcid")
+                    else None
+                )
+                all_rows.append(
+                    {
+                        "Gene Set ID": gs["id"],
+                        "Term": gs["term"],
+                        "Description": gs["description"],
+                        "# Genes in Set": gs["nGeneIds"],
+                        "p-value": entry["pvalue"],
+                        "adj. p-value": entry["adjPvalue"],
+                        "Odds Ratio": entry["oddsRatio"],
+                        "# Overlap": entry["nOverlap"],
+                        "PubMed Title": pub.get("title") if pub else None,
+                        "PMCID": pub.get("pmcid") if pub else None,
+                    }
+                )
 
         current_offset += first
         if max_records and len(all_rows) >= max_records:
@@ -187,7 +197,7 @@ def genes_query(gene_set_id: str, url: str = GRAPHQL_URL) -> pd.DataFrame:
         query=query,
         variables={"id": gene_set_id},
         operation_name="ViewGeneSet",
-        url=url
+        url=url,
     )
 
     return pd.DataFrame(data["geneSet"]["genes"]["nodes"])
@@ -197,7 +207,7 @@ def overl_query(
     gene_set_id: str,
     genes: List[str],
     url: str = GRAPHQL_URL,
-    headers: Optional[Dict] = None
+    headers: Optional[Dict] = None,
 ) -> pd.DataFrame:
     """
     Find overlapping genes between a user gene list and a gene set.
@@ -229,7 +239,7 @@ def overl_query(
         variables={"id": gene_set_id, "genes": genes},
         operation_name="OverlapQuery",
         url=url,
-        headers=headers
+        headers=headers,
     )
 
     return pd.DataFrame(data["geneSet"]["overlap"]["nodes"])
@@ -240,7 +250,7 @@ def table_search_query(
     offset: int = 0,
     first: int = 10000,
     url: str = GRAPHQL_URL,
-    headers: Optional[Dict] = None
+    headers: Optional[Dict] = None,
 ) -> pd.DataFrame:
     """
     Search gene sets by keywords in their term/title.
@@ -274,7 +284,7 @@ def table_search_query(
         variables={"terms": term_list, "offset": offset, "first": first},
         operation_name="TermSearch",
         url=url,
-        headers=headers
+        headers=headers,
     )
 
     return pd.DataFrame(data["geneSetTermSearch"]["nodes"])
@@ -297,7 +307,7 @@ def search_pubmed(term: str, retmax: int = 5000) -> List[str]:
         "term": term,
         "retmode": "json",
         "retmax": retmax,
-        "sort": "relevance"  # options: 'relevance', 'pub+date'
+        "sort": "relevance",  # options: 'relevance', 'pub+date'
     }
 
     r = requests.get(search_url, params=search_params)
@@ -305,7 +315,9 @@ def search_pubmed(term: str, retmax: int = 5000) -> List[str]:
     return r.json().get("esearchresult", {}).get("idlist", [])
 
 
-def fetch_pmc_info(pmcids: List[str], url: str = GRAPHQL_URL, headers: Optional[Dict] = None) -> pd.DataFrame:
+def fetch_pmc_info(
+    pmcids: List[str], url: str = GRAPHQL_URL, headers: Optional[Dict] = None
+) -> pd.DataFrame:
     """
     Get metadata for PMC articles by their PMCIDs.
 
@@ -333,13 +345,15 @@ def fetch_pmc_info(pmcids: List[str], url: str = GRAPHQL_URL, headers: Optional[
         variables={"pmcids": pmcids},
         operation_name="GetPmcInfoByIds",
         url=url,
-        headers=headers
+        headers=headers,
     )
 
     return pd.DataFrame(data["getPmcInfoByIds"]["nodes"])
 
 
-def gene_sets_paper_query(pmcids: List[str], url: str = GRAPHQL_URL, headers: Optional[Dict] = None) -> pd.DataFrame:
+def gene_sets_paper_query(
+    pmcids: List[str], url: str = GRAPHQL_URL, headers: Optional[Dict] = None
+) -> pd.DataFrame:
     """
     Determine how frequently gene sets (terms) appear in PMC articles.
 
@@ -367,7 +381,7 @@ def gene_sets_paper_query(pmcids: List[str], url: str = GRAPHQL_URL, headers: Op
         variables={"pmcids": pmcids},
         operation_name="TermsPmcs",
         url=url,
-        headers=headers
+        headers=headers,
     )
     data = pd.DataFrame(data["termsPmcsCount"]["nodes"])
     data = data.rename(columns={"pmc": "pmcid"})

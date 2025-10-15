@@ -14,7 +14,7 @@ import json
 import logging
 import os
 import traceback
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 from itertools import combinations
 from pathlib import Path
@@ -28,7 +28,6 @@ from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError
 from dotenv import load_dotenv
 from fastmcp import Context, FastMCP
 from pydantic import ValidationError
-from tqdm import tqdm
 
 from src.discovera.bkd.gsea import nrank_ora, rank_gsea, run_deseq2
 from src.discovera.bkd.mygeneinfo import fetch_gene_annota
@@ -480,7 +479,7 @@ def _preview_dataframe(df: pd.DataFrame, n_rows: int | None = None) -> dict:
         head = df.head(n)
         return {
             "columns": list(head.columns),
-            "rows": head.to_dict(orient="records"),
+            "rows": head.to_json(orient="records"),
             "total_rows": int(len(df)),
         }
     except Exception:
@@ -597,6 +596,23 @@ def _truncate_dataframe_columns(
         return df
     except Exception:
         return df
+
+
+def _run_nodes_batches_sync(nodes_lists: list[tuple[str, ...]]):
+    """Run nodes_batch over combos and collect DataFrames (sync function for CPU pool)."""
+    results: list[pd.DataFrame] = []
+    try:
+        for combo in nodes_lists:
+            try:
+                df = nodes_batch(combo)
+                if df is not None:
+                    results.append(df)
+            except Exception:
+                # best-effort: skip failing combo
+                continue
+    except Exception:
+        pass
+    return results
 
 
 def create_server():
@@ -972,8 +988,9 @@ def create_server():
             }
             return _exception_payload("run_deseq2_gsea_pipe", e, context)
 
-    @mcp.tool()
+    @mcp.tool
     async def query_genes(
+        ctx: Context,
         genes: List[str],
         size: Optional[int] = None,
     ) -> Dict[str, Any]:
@@ -1002,15 +1019,21 @@ def create_server():
 
         nodes_lists = list(combinations(nodes, r=int(params.size)))
 
-        with ThreadPoolExecutor() as executor:
-            # Map the nodes_lists to the executor for parallel processing
-            for statements in tqdm(
-                executor.map(nodes_batch, nodes_lists),
-                total=len(nodes_lists),
-                desc="Processing nodes",
-            ):
-                if statements is not None:
-                    results.append(statements)
+        # start sending heartbeat
+        heartbeat_task = start_keepalive(ctx, 5.0)
+
+        try:
+            # Run nodes_batch over all combinations in a separate process for CPU-bound work
+            results = await asyncio.get_running_loop().run_in_executor(
+                CPU_POOL,
+                functools.partial(
+                    _run_nodes_batches_sync,
+                    nodes_lists,
+                ),
+            )
+        finally:
+            # cancel heartbeat regardless of success/failure
+            heartbeat_task.cancel()
 
         if results:
             combined_df = pd.concat(results, ignore_index=True)
@@ -1033,32 +1056,69 @@ def create_server():
                 col for col in selected_columns if col in combined_df.columns
             ]
             combined_df = combined_df[existing_columns]
-            combined_df["url"] = "https://doi.org/" + combined_df["text_refs.DOI"]
+            # Safe URL construction if DOI present
+            if "text_refs.DOI" in combined_df.columns:
+                combined_df["url"] = "https://doi.org/" + combined_df[
+                    "text_refs.DOI"
+                ].astype(str)
+            else:
+                combined_df["url"] = ""
+
+            # Ensure belief column exists for sorting
+            if "belief" not in combined_df.columns:
+                combined_df["belief"] = 0.0
 
             # TODO: check if this is the best way to handle this
             # Step 1: Pick one row with highest belief per unique 'type'
-            type_representatives = combined_df.sort_values(
-                "belief", ascending=False
-            ).drop_duplicates(subset="type", keep="first")
+            # Sort by belief if available, then pick one per type when possible
+            type_sorted = combined_df.sort_values(
+                by=["belief"],
+                ascending=[False] if "belief" in combined_df.columns else [True],
+            )
+            if "type" in type_sorted.columns:
+                type_representatives = type_sorted.drop_duplicates(
+                    subset="type", keep="first"
+                )
+            else:
+                # Fallback: take top rows as representatives
+                type_representatives = type_sorted.head(min(5, len(type_sorted)))
 
             # Step 2: Exclude already selected rows
             remaining_df = combined_df.drop(type_representatives.index)
 
             # Step 3: Track used subj and obj names
-            used_subj = set(type_representatives["subj.name"])
-            used_obj = set(type_representatives["obj.name"])
+            subj_col = (
+                "subj.name" if "subj.name" in type_representatives.columns else None
+            )
+            obj_col = "obj.name" if "obj.name" in type_representatives.columns else None
+            used_subj = set(type_representatives[subj_col]) if subj_col else set()
+            used_obj = set(type_representatives[obj_col]) if obj_col else set()
 
             # Step 4: Define mask to prioritize diverse subj/obj
-            remaining_df = remaining_df.assign(
-                is_new_subj=~remaining_df["subj.name"].isin(used_subj),
-                is_new_obj=~remaining_df["obj.name"].isin(used_obj),
-            )
+            if subj_col and subj_col in remaining_df.columns:
+                remaining_df = remaining_df.assign(
+                    is_new_subj=~remaining_df[subj_col].isin(used_subj)
+                )
+            else:
+                remaining_df = remaining_df.assign(is_new_subj=True)
+            if obj_col and obj_col in remaining_df.columns:
+                remaining_df = remaining_df.assign(
+                    is_new_obj=~remaining_df[obj_col].isin(used_obj)
+                )
+            else:
+                remaining_df = remaining_df.assign(is_new_obj=True)
 
             # Step 5: Sort by new subj/obj and belief
-            remaining_df = remaining_df.sort_values(
-                by=["is_new_subj", "is_new_obj", "belief"],
-                ascending=[False, False, False],
-            )
+            sort_keys = [
+                key
+                for key in ["is_new_subj", "is_new_obj", "belief"]
+                if key in remaining_df.columns
+            ]
+            if sort_keys:
+                remaining_df = remaining_df.sort_values(
+                    by=sort_keys,
+                    ascending=[False if k != "belief" else False for k in sort_keys],
+                )
 
             # Step 6: Select additional rows to make total 20
             additional_needed = 20 - len(type_representatives)
@@ -1074,12 +1134,11 @@ def create_server():
                 final_df, ["text"], MAX_CELL_CHARS_DEFAULT
             )
             final_df = _limit_dataframe_rows(final_df, MAX_ROWS_DEFAULT)
-
-            return final_df.to_dict()
+            return final_df.to_dict(orient="records")
         else:
             return {}
 
-    @mcp.tool()
+    @mcp.tool
     async def count_edges(
         edges: List[Dict[str, Any]],
         grouping: Optional[str] = None,
@@ -1088,7 +1147,7 @@ def create_server():
         Group and count interactions (edges) by a chosen grouping level.
 
         Args:
-            edges (List[Dict[str, Any]]): Edge records to aggregate (tabular dict format).
+            edges (List[Dict[str, Any]]): REQUIRED Edge records to aggregate (tabular dict format).
             grouping (Optional[str]): One of "summary" | "detailed" | "view". Defaults to "detailed".
                 - summary: group by nodes
                 - detailed: group by nodes, type, subj.name, obj.name
@@ -1130,7 +1189,7 @@ def create_server():
         # Group by the specified columns and count the occurrences
         grouped_df = edges_df.groupby(group_columns).size().reset_index(name="count")
         grouped_df = _limit_dataframe_rows(grouped_df, MAX_ROWS_DEFAULT)
-        return grouped_df.to_dict()
+        return grouped_df.to_dict(orient="records")
 
     @mcp.tool
     async def gsea_pipe(
@@ -1283,8 +1342,8 @@ def create_server():
                     down_genes["Lead_genes"] = down_genes["Lead_genes"].apply(
                         lambda x: x.split(";")[:10]
                     )
-                    top_low_nes[database] = down_genes.to_json(orient="records")
-                    top_high_nes[database] = up_genes.to_json(orient="records")
+                    top_low_nes[database] = down_genes.to_dict(orient="records")
+                    top_high_nes[database] = up_genes.to_dict(orient="records")
                     counts_by_database[database] = {
                         "up": total_ups,
                         "down": total_downs,
@@ -1301,8 +1360,8 @@ def create_server():
                 down_genes["Lead_genes"] = down_genes["Lead_genes"].apply(
                     lambda x: x.split(";")[:10]
                 )
-                top_low_nes = down_genes.to_json(orient="records")
-                top_high_nes = up_genes.to_json(orient="records")
+                top_low_nes = down_genes.to_dict(orient="records")
+                top_high_nes = up_genes.to_dict(orient="records")
                 counts_by_database = {
                     "up": total_ups,
                     "down": total_downs,
@@ -1465,7 +1524,7 @@ def create_server():
 
             logger.info(f"[ora_pipe] Number of matching results: {len(ora_results)}")
             return {
-                "ora_results": ora_results.to_dict(),
+                "ora_results": ora_results.to_dict(orient="records"),
                 "ora_result_metadata": ora_result_metadata,
             }
         except Exception as e:
@@ -1508,7 +1567,7 @@ def create_server():
         )
         df = _limit_dataframe_rows(df, MAX_ROWS_DEFAULT)
         logger.info("🛠️[enrich_rumma] Enrichment fetched successfully")
-        return df.to_dict()
+        return df.to_dict(orient="records")
 
     @mcp.tool()
     async def query_string_rumma(
@@ -1539,7 +1598,7 @@ def create_server():
             return {}
         sets_art = gene_sets_paper_query(articles["pmcid"].tolist())
         if not isinstance(sets_art, pd.DataFrame) or sets_art.empty:
-            return articles.to_dict()
+            return articles.to_dict(orient="records")
         sets_art = sets_art.rename(columns={"pmc": "pmcid"})
         merged = articles.merge(sets_art, how="left", on="pmcid")
         # Preserve original order
@@ -1552,7 +1611,7 @@ def create_server():
         )
         merged = _limit_dataframe_rows(merged, MAX_ROWS_DEFAULT)
         logger.info("🛠️[query_string_rumm] Query string fetched successfully")
-        return merged.to_dict()
+        return merged.to_dict(orient="records")
 
     @mcp.tool()
     async def query_table_rumma(term: str) -> Dict[str, Any]:
@@ -1578,7 +1637,7 @@ def create_server():
         df = _truncate_dataframe_columns(df, ["term", "pmcid"], MAX_CELL_CHARS_DEFAULT)
         df = _limit_dataframe_rows(df, MAX_ROWS_DEFAULT)
         logger.info("🛠️[query_table_rumm] Query table fetched successfully")
-        return df.to_dict()
+        return df.to_dict(orient="records")
 
     @mcp.tool()
     async def sets_info_rumm(gene_set_id: str) -> Dict[str, Any]:
@@ -1602,7 +1661,7 @@ def create_server():
         )
         df = _limit_dataframe_rows(df, MAX_ROWS_DEFAULT)
         logger.info("🛠️[sets_info_rumm] Sets info fetched successfully")
-        return df.to_dict()
+        return df.to_dict(orient="records")
 
     @mcp.tool()
     async def literature_trends(
