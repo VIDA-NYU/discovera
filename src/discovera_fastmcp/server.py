@@ -1134,7 +1134,7 @@ def create_server():
                 final_df, ["text"], MAX_CELL_CHARS_DEFAULT
             )
             final_df = _limit_dataframe_rows(final_df, MAX_ROWS_DEFAULT)
-            return final_df.to_dict(orient="records")
+            return final_df.to_dict()
         else:
             return {}
 
@@ -1189,7 +1189,7 @@ def create_server():
         # Group by the specified columns and count the occurrences
         grouped_df = edges_df.groupby(group_columns).size().reset_index(name="count")
         grouped_df = _limit_dataframe_rows(grouped_df, MAX_ROWS_DEFAULT)
-        return grouped_df.to_dict(orient="records")
+        return grouped_df.to_dict()
 
     @mcp.tool
     async def gsea_pipe(
