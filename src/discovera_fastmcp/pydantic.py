@@ -77,7 +77,18 @@ in the analysis.
 The maximum number of genes allowed in a gene set.
 """,
     )
-    threshold: Optional[float] = 0.05
+    p_value_threshold: Optional[float] = Field(
+        default=0.05,
+        description="""
+The p-value threshold for the GSEA results.
+""",
+    )
+    fdr_threshold: Optional[float] = Field(
+        default=0.05,
+        description="""
+The FDR threshold for the GSEA results.
+""",
+    )
 
 
 class QueryGenesInput(BaseModel):
@@ -264,27 +275,12 @@ Defaults to "detailed".
 
 
 class StorageListInput(BaseModel):
-    origin_tool: Optional[str] = None
-    tag: Optional[str] = None
-    ext: Optional[str] = None
     category: Optional[str] = None
     name_contains: Optional[str] = None
-    since: Optional[str] = Field(
-        default=None,
-        description="""
-ISO timestamp; include files created at or after this time.
-""",
-    )
-    until: Optional[str] = Field(
-        default=None,
-        description="""
-ISO timestamp; include files created at or before this time.
-""",
-    )
     with_content: Optional[bool] = Field(
         default=False,
         description="""
-If true, include content (text or base64) up to max_bytes in the response.
+If true, include content (text preview) up to max_bytes in the response.
 """,
     )
     max_bytes: Optional[int] = Field(
@@ -640,9 +636,15 @@ Column name in raw counts holding gene identifiers.
 Gene set libraries to use in downstream GSEA.
 """,
     )
-    threshold: Optional[float] = Field(
+    p_value_threshold: Optional[float] = Field(
         default=0.05,
         description="""
-Threshold GSEA p-value.
+Filter GSEA results by p-value.
+""",
+    )
+    fdr_threshold: Optional[float] = Field(
+        default=0.05,
+        description="""
+Filter GSEA results by FDR.
 """,
     )

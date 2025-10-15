@@ -302,10 +302,6 @@ def _slugify(value: str) -> str:
     return safe.strip("-") or "file"
 
 
-def _is_text_ext(ext: str) -> bool:
-    return ext.lower() in {".txt", ".csv", ".tsv", ".json", ".md", ".yaml", ".yml"}
-
-
 def _register_file(
     path: str,
     category: str,
@@ -321,38 +317,33 @@ def _register_file(
     # Build entry
     stat = p.stat()
     file_hash = hashlib.md5(abs_path.encode("utf-8")).hexdigest()[:8]
-    created_at = datetime.now().isoformat()
+    # Timestamp omitted in minimal entry to save tokens
     entry_id = f"{int(stat.st_mtime)}_{file_hash}"
 
     entry = {
         "id": entry_id,
         "path": abs_path,
         "name": p.name,
-        "ext": p.suffix.lower(),
-        "size_bytes": stat.st_size,
-        "mtime": stat.st_mtime,
-        "created_at": created_at,
         "category": category,
-        "origin_tool": origin_tool,
-        "tags": tags or [],
-        "metadata": metadata or {},
     }
 
     # Optionally upload to S3 and attach presigned URL
     try:
         s3_info = _s3_upload_and_presign(abs_path)
         if s3_info:
-            entry["s3_key"] = s3_info.get("s3_key")
             entry["s3_presigned_url"] = s3_info.get("s3_presigned_url")
     except Exception:
         pass
 
     entries = _load_storage_index()
-    # Replace if same path exists
-    entries = [e for e in entries if e.get("path") != abs_path]
+    entries = [
+        {k: e.get(k) for k in ("id", "path", "name", "category", "s3_presigned_url")}
+        for e in entries
+        if e.get("path") != abs_path
+    ]
     entries.append(entry)
     _save_storage_index(entries)
-    return entry
+    return {k: entry.get(k) for k in ("id", "name", "path", "s3_presigned_url")}
 
 
 def _filter_entries(
@@ -365,60 +356,39 @@ def _filter_entries(
     since: str | None = None,
     until: str | None = None,
 ) -> list:
+    """Filter minimal storage entries using only supported fields.
+
+    Legacy arguments (origin_tool, tag, ext, since, until) are accepted for
+    compatibility but ignored because entries no longer store those attributes.
+    """
+
     def _match(e: dict) -> bool:
-        if origin_tool and e.get("origin_tool") != origin_tool:
-            return False
-        if tag and tag not in (e.get("tags") or []):
-            return False
-        if ext and e.get("ext") != (
-            ext.lower() if ext.startswith(".") else f".{ext.lower()}"
-        ):
-            return False
         if category and e.get("category") != category:
             return False
-        if name_contains and name_contains.lower() not in e.get("name", "").lower():
+        if name_contains and name_contains.lower() not in (e.get("name") or "").lower():
             return False
-        if since:
-            try:
-                if e.get("created_at") < since:
-                    return False
-            except Exception:
-                pass
-        if until:
-            try:
-                if e.get("created_at") > until:
-                    return False
-            except Exception:
-                pass
         return True
 
     return [e for e in entries if _match(e)]
 
 
 def _read_file_content(entry: dict, with_content: bool, max_bytes: int) -> dict:
-    result = {**entry}
+    # Only return minimal metadata + optional content
+    result = {k: entry.get(k) for k in ("id", "name", "path", "s3_presigned_url")}
     if not with_content:
         return result
     try:
         path = entry.get("path")
         if not path or not os.path.exists(path):
             result["content_text"] = None
-            result["content_base64"] = None
             result["truncated"] = False
             return result
         size = os.path.getsize(path)
         truncated = size > max_bytes
-        mode = "r" if _is_text_ext(entry.get("ext", "")) else "rb"
-        if mode == "r":
-            with open(path, mode, encoding="utf-8", errors="ignore") as f:
-                data = f.read(max_bytes)
-            result["content_text"] = data
-            result["content_base64"] = None
-        else:
-            with open(path, mode) as f:
-                data = f.read(max_bytes)
-            result["content_text"] = None
-            result["content_base64"] = base64.b64encode(data).decode("utf-8")
+        # Text preview only (saves tokens vs base64)
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            data = f.read(max_bytes)
+        result["content_text"] = data
         result["truncated"] = truncated
         return result
     except Exception as e:
@@ -467,7 +437,8 @@ def _save_dataframe_csv(
             tags=["csv", "generated"] + (tags or []),
             metadata=metadata or {},
         )
-        return entry
+        # Return public/minimal info
+        return {k: entry.get(k) for k in ("id", "name", "path", "s3_presigned_url")}
     except Exception as e:
         raise e
 
@@ -703,7 +674,8 @@ def create_server():
         sample_groups: Optional[Dict[str, List[str]]] = None,
         gene_column: Optional[str] = None,
         gene_sets: Optional[List[str]] = None,
-        threshold: Optional[float] = None,
+        p_value_threshold: Optional[float] = None,
+        fdr_threshold: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Performs DESeq2 differential expression (DE) from raw RNA‑seq counts, then runs
@@ -734,8 +706,8 @@ def create_server():
             gene_sets (Optional[List[str]]):
                 Gene set libraries for GSEA. Defaults to:
                 ["KEGG_2016", "GO_Biological_Process_2023", "Reactome_Pathways_2024", "MSigDB_Hallmark_2020"].
-            threshold (float, optional):
-                Multiple-testing filter used by downstream GSEA (e.g., for display/selection). Default: 0.05.
+            p_value_threshold (float, optional): Filter GSEA results by p-value. Defaults to 0.05.
+            fdr_threshold (float, optional): Filter GSEA results by FDR. Defaults to 0.05.
 
         Returns:
             Dict[str, Any] with keys including:
@@ -755,7 +727,8 @@ def create_server():
                 "sample_groups": sample_groups,
                 "gene_column": gene_column,
                 "gene_sets": gene_sets,
-                "threshold": threshold,
+                "p_value_threshold": p_value_threshold,
+                "fdr_threshold": fdr_threshold,
             },
             RunDeseq2GseaInput,
             "run_deseq2_gsea_pipe",
@@ -865,7 +838,8 @@ def create_server():
                     corr_col="log2FoldChange",
                     min_size=5,
                     max_size=200,
-                    threshold=params.threshold,
+                    p_value_threshold=params.p_value_threshold,
+                    fdr_threshold=params.fdr_threshold,
                     timestamp=timestamp,
                 ),
             )
@@ -896,11 +870,11 @@ def create_server():
                         # Clip the leading genes to at most 5
                         up_genes = gsea_df_db.head(5)
                         up_genes["Lead_genes"] = up_genes["Lead_genes"].apply(
-                            lambda x: x.split(";")[:10]
+                            lambda x: x.split(",")[:10]
                         )
                         down_genes = gsea_df_db.tail(5)
                         down_genes["Lead_genes"] = down_genes["Lead_genes"].apply(
-                            lambda x: x.split(";")[:10]
+                            lambda x: x.split(",")[:10]
                         )
                         top_low_nes[database] = down_genes.to_json(orient="records")
                         top_high_nes[database] = up_genes.to_json(orient="records")
@@ -914,11 +888,11 @@ def create_server():
                     total_downs = int((gsea_df["NES"] < 0).sum())
                     up_genes = gsea_df.head(10)
                     up_genes["Lead_genes"] = up_genes["Lead_genes"].apply(
-                        lambda x: x.split(";")[:10]
+                        lambda x: x.split(",")[:10]
                     )
                     down_genes = gsea_df.tail(10)
                     down_genes["Lead_genes"] = down_genes["Lead_genes"].apply(
-                        lambda x: x.split(";")[:10]
+                        lambda x: x.split(",")[:10]
                     )
                     top_low_nes = down_genes.to_json(orient="records")
                     top_high_nes = up_genes.to_json(orient="records")
@@ -945,7 +919,8 @@ def create_server():
                             metadata={
                                 "hit_col": "GeneID",
                                 "corr_col": "log2FoldChange",
-                                "threshold": params.threshold,
+                                "p_value_threshold": params.p_value_threshold,
+                                "fdr_threshold": params.fdr_threshold,
                             },
                         )
                 except Exception:
@@ -1200,14 +1175,15 @@ def create_server():
         gene_sets: Optional[List[str]] = None,
         min_size: Optional[int] = None,
         max_size: Optional[int] = None,
-        threshold: Optional[float] = None,
+        p_value_threshold: Optional[float] = None,
+        fdr_threshold: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Performs Gene Set Enrichment Analysis (GSEA), a computational method
         used to determine whether a set of genes related to a biological function or pathway
         shows a consistent pattern of upregulation or downregulation between two conditions
         (e.g., healthy vs. diseased, treated vs. untreated). GSEA helps identify pathways
-        that are significantly enriched in the data.
+        that are significantly enriched in the data. p-value and FDR thresholds are used to filter the results.
 
         Note for LLM agents:
             - This tool returns only the top results (high/low NES) for brevity.
@@ -1246,7 +1222,8 @@ def create_server():
             max_size (int, optional): The maximum number of genes allowed in a gene set for it to be tested.
                 - Default is `200` (gene sets with more than 200 genes are excluded to maintain specificity).
 
-            threshold (float, optional): Defaults to 0.05.
+            p_value_threshold (float, optional): Defaults to 0.05.
+            fdr_threshold (float, optional): Defaults to 0.05.
 
         Returns:
             - top_high_nes: Top 5 high NES results for each database.
@@ -1270,7 +1247,8 @@ def create_server():
                 "corr_col": corr_col,
                 "min_size": min_size,
                 "max_size": max_size,
-                "threshold": threshold,
+                "p_value_threshold": p_value_threshold,
+                "fdr_threshold": fdr_threshold,
             },
             GseaPipeInput,
             "gsea_pipe",
@@ -1301,7 +1279,8 @@ def create_server():
                     corr_col=params.corr_col,
                     min_size=params.min_size,
                     max_size=params.max_size,
-                    threshold=params.threshold,
+                    p_value_threshold=params.p_value_threshold,
+                    fdr_threshold=params.fdr_threshold,
                     timestamp=timestamp,
                 ),
             )
@@ -1336,11 +1315,11 @@ def create_server():
                     # Clip the leading genes to at most 5
                     up_genes = sorted_results_db.head(5)
                     up_genes["Lead_genes"] = up_genes["Lead_genes"].apply(
-                        lambda x: x.split(";")[:10]
+                        lambda x: x.split(",")[:10]
                     )
                     down_genes = sorted_results_db.tail(5)
                     down_genes["Lead_genes"] = down_genes["Lead_genes"].apply(
-                        lambda x: x.split(";")[:10]
+                        lambda x: x.split(",")[:10]
                     )
                     top_low_nes[database] = down_genes.to_dict(orient="records")
                     top_high_nes[database] = up_genes.to_dict(orient="records")
@@ -1354,11 +1333,11 @@ def create_server():
                 total_downs = int((sorted_results["NES"] < 0).sum())
                 up_genes = sorted_results.head(10)
                 up_genes["Lead_genes"] = up_genes["Lead_genes"].apply(
-                    lambda x: x.split(";")[:10]
+                    lambda x: x.split(",")[:10]
                 )
                 down_genes = sorted_results.tail(10)
                 down_genes["Lead_genes"] = down_genes["Lead_genes"].apply(
-                    lambda x: x.split(";")[:10]
+                    lambda x: x.split(",")[:10]
                 )
                 top_low_nes = down_genes.to_dict(orient="records")
                 top_high_nes = up_genes.to_dict(orient="records")
@@ -1384,7 +1363,8 @@ def create_server():
                         origin_tool="gsea_pipe",
                         tags=["gsea", "results"],
                         metadata={
-                            "threshold": params.threshold,
+                            "p_value_threshold": params.p_value_threshold,
+                            "fdr_threshold": params.fdr_threshold,
                             "hit_col": params.hit_col,
                             "corr_col": params.corr_col,
                         },
@@ -1405,7 +1385,10 @@ def create_server():
                 pass
 
             logger.info(
-                f"[gsea_pipe] Number of matching results with p/q-val < {params.threshold}: {len(sorted_results)}"
+                (
+                    f"[gsea_pipe] Results filtered by p<{params.p_value_threshold}, "
+                    f"FDR<{params.fdr_threshold}: {len(sorted_results)}"
+                )
             )
 
             return {
@@ -1423,7 +1406,8 @@ def create_server():
                 "gene_sets": params.gene_sets,
                 "min_size": params.min_size,
                 "max_size": params.max_size,
-                "threshold": params.threshold,
+                "p_value_threshold": params.p_value_threshold,
+                "fdr_threshold": params.fdr_threshold,
             }
             return _exception_payload("gsea_pipe", e, context)
 
@@ -1778,7 +1762,7 @@ def create_server():
         df = _limit_dataframe_rows(df, MAX_ROWS_DEFAULT)
 
         logger.info("🛠️[gene_info] Gene info fetched successfully")
-        return df.to_dict()
+        return df.to_dict(orient="records")
 
     # =========================
     # Local storage tools
@@ -1786,13 +1770,8 @@ def create_server():
 
     @mcp.tool()
     async def storage_list(
-        origin_tool: Optional[str] = None,
-        tag: Optional[str] = None,
-        ext: Optional[str] = None,
         category: Optional[str] = None,
         name_contains: Optional[str] = None,
-        since: Optional[str] = None,
-        until: Optional[str] = None,
         with_content: Optional[bool] = None,
         max_bytes: Optional[int] = None,
     ) -> Dict[str, Any]:
@@ -1800,13 +1779,8 @@ def create_server():
         List stored files on MCP server with optional filters and optional content preview.
 
         Args:
-            origin_tool (Optional[str]): Filter by originating tool name.
-            tag (Optional[str]): Filter by a tag.
-            ext (Optional[str]): Filter by file extension (e.g., ".csv").
             category (Optional[str]): Logical category (e.g., generated, user_input).
             name_contains (Optional[str]): Substring match on filename.
-            since (Optional[str]): ISO timestamp to include files at or after this time.
-            until (Optional[str]): ISO timestamp to include files at or before this time.
             with_content (Optional[bool]): If true, include content up to max_bytes.
             max_bytes (Optional[int]): Max bytes to read when including content (default 1 MB).
 
@@ -1817,13 +1791,8 @@ def create_server():
             # Validate/construct params
             params = _validate_params(
                 {
-                    "origin_tool": origin_tool,
-                    "tag": tag,
-                    "ext": ext,
                     "category": category,
                     "name_contains": name_contains,
-                    "since": since,
-                    "until": until,
                     "with_content": with_content,
                     "max_bytes": max_bytes,
                 },
@@ -1832,51 +1801,11 @@ def create_server():
             )
 
             entries = _load_storage_index()
-            # Delete files older than 24 hours and prune them from index
-            try:
-                from datetime import timedelta
-
-                cutoff = datetime.now() - timedelta(hours=24)
-                kept_entries: list[dict] = []
-                for e in entries:
-                    is_old = False
-                    try:
-                        created_at = e.get("created_at")
-                        if created_at:
-                            created_dt = datetime.fromisoformat(str(created_at))
-                            is_old = created_dt < cutoff
-                        else:
-                            mtime = e.get("mtime")
-                            if mtime is not None:
-                                is_old = datetime.fromtimestamp(float(mtime)) < cutoff
-                    except Exception:
-                        is_old = False
-
-                    if is_old:
-                        path = e.get("path")
-                        try:
-                            if path and os.path.exists(path):
-                                os.remove(path)
-                        except Exception:
-                            pass
-                        # Do not keep this entry
-                        continue
-                    kept_entries.append(e)
-                if len(kept_entries) != len(entries):
-                    _save_storage_index(kept_entries)
-                entries = kept_entries
-            except Exception:
-                # best effort cleanup
-                pass
+            # Keep entries as-is; minimal index no longer prunes by age
             filtered = _filter_entries(
                 entries,
-                origin_tool=params.origin_tool,
-                tag=params.tag,
-                ext=params.ext,
                 category=params.category,
                 name_contains=params.name_contains,
-                since=params.since,
-                until=params.until,
             )
             if params.with_content:
                 enriched = [
@@ -1891,23 +1820,15 @@ def create_server():
                     )
                     for e in filtered
                 ]
-                # Prune heavy metadata from response
-                for item in enriched:
-                    try:
-                        if "metadata" in item:
-                            del item["metadata"]
-                    except Exception:
-                        pass
                 logger.info("🛠️[storage_list] %d enriched files found", len(enriched))
                 return {"items": enriched}
-            # Prune heavy metadata from response
-            pruned = []
-            for e in filtered:
-                d = dict(e)
-                d.pop("metadata", None)
-                pruned.append(d)
-            logger.info("🛠️[storage_list] %d files found", len(pruned))
-            return {"items": pruned}
+            # Minimal fields only
+            minimal = [
+                {k: e.get(k) for k in ("id", "name", "path", "s3_presigned_url")}
+                for e in filtered
+            ]
+            logger.info("🛠️[storage_list] %d files found", len(minimal))
+            return {"items": minimal}
         except Exception as e:
             return _exception_payload("storage_list", e, {})
 
@@ -1962,7 +1883,7 @@ def create_server():
                 logger.info("🛠️[storage_get] Content read successfully")
                 return content
             logger.info("🛠️[storage_get] Returning minimal entry for %s", entry["path"])
-            return entry
+            return {k: entry.get(k) for k in ("id", "name", "path", "s3_presigned_url")}
         except Exception as e:
             return _exception_payload("storage_get", e, {"id": params.id})
 

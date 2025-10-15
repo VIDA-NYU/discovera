@@ -481,7 +481,8 @@ def rank_gsea(
     corr_col,
     min_size=5,
     max_size=200,
-    threshold=0.05,
+    p_value_threshold=0.05,
+    fdr_threshold=0.05,
     timestamp=None,
 ):
     if timestamp is None:
@@ -543,6 +544,10 @@ def rank_gsea(
                     "Lead_genes",
                 ]
             ]
+            if p_value_threshold:
+                res_df = res_df[res_df["NOS p-val"].lt(p_value_threshold)]
+            if fdr_threshold:
+                res_df = res_df[res_df["FDR q-val"].lt(fdr_threshold)]
             if results_df is None:
                 results_df = res_df
             else:
@@ -553,7 +558,9 @@ def rank_gsea(
         return pd.DataFrame()
 
     save_with_timestamp(results_df, "gsea_results", timestamp)
-    print(f"Number of matching results with p-val < {threshold}: {len(results_df)}")
+    print(
+        f"Number of matching results with p-val < {p_value_threshold}, fdr < {fdr_threshold}: {len(results_df)}"
+    )
 
     sorted_results = results_df.sort_values(by="NES", ascending=False)
     top_low_nes = sorted_results.head(10)
