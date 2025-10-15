@@ -1,5 +1,12 @@
 import pandas as pd
 import os
+import numpy as np
+import torch
+from sentence_transformers import SentenceTransformer, util
+from bert_score import score as bert_score
+from rouge_score import rouge_scorer
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+
 from plotnine import (
     ggplot, aes, geom_histogram, geom_vline, geom_boxplot, geom_jitter,
     geom_point, geom_abline, geom_text,
@@ -7,7 +14,6 @@ from plotnine import (
     scale_color_manual
 )
 from functools import reduce
-
 
 def load_and_merge_reports(
         paths, columns_to_rename=None
@@ -353,3 +359,120 @@ def agreement_x_analysis(df, output_dir="../../output/"):
     except Exception as e:
         print(f"Error generating ggplot-style agreement plots: {e}")
 
+
+def traditional_similarity_metrics(
+    input_path="../data/benchmark/benchmark.csv",
+    output_dir="../../output/",
+    sts_model="dmlls/all-mpnet-base-v2-negation",
+    ground_truth_col="Ground Truth",
+    compare_cols=None
+):
+    """
+    Compute semantic textual similarity (STS), BERTScore, ROUGE and BLEU between
+    generated reports and a ground truth report.
+
+    Args:
+        input_path: str
+            Path to CSV or Excel file containing model outputs.
+        output_dir: str
+            Directory where results will be saved.
+        model_name: str
+            SentenceTransformer model name for STS.
+        ground_truth_col: str
+            Name of the ground truth column.
+        compare_cols: list of str
+            List of columns to compare against the ground truth.
+
+    Returns:
+        (DataFrame with scores, Summary DataFrame)
+    """
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        print(f"Loading data from {input_path}...")
+
+        # --- Load data ---
+        if input_path.endswith(".xlsx"):
+            df = pd.read_excel(input_path)
+        else:
+            df = pd.read_csv(input_path)
+
+        # --- Validate columns ---
+        if ground_truth_col not in df.columns:
+            raise ValueError(f"Ground truth column '{ground_truth_col}' not found in data.")
+
+        if compare_cols is None:
+            compare_cols = [c for c in df.columns if c != ground_truth_col]
+
+        missing = [c for c in compare_cols if c not in df.columns]
+        if missing:
+            raise ValueError(f"Missing comparison columns: {missing}")
+
+        # Fill missing text with empty strings
+        for c in [ground_truth_col] + compare_cols:
+            df[c] = df[c].fillna("")
+
+        print(f"Comparing reports: {compare_cols} against '{ground_truth_col}'")
+
+        # --- Semantic Textual Similarity (STS) ---
+        print("Computing Sentence Similarity (STS)...")
+        sts_model = SentenceTransformer(sts_model)
+
+        gt_emb = sts_model.encode(df[ground_truth_col], convert_to_tensor=True)
+        for col in compare_cols:
+            emb = sts_model.encode(df[col], convert_to_tensor=True)
+            df[f"STS_{col}_vs_{ground_truth_col}"] = util.cos_sim(emb, gt_emb).diagonal().cpu().numpy()
+
+        # --- BERTScore ---
+        #print(" Computing BERTScore (semantic precision/recall/F1)...")
+        #for col in compare_cols:
+        #    P, R, F = bert_score(df[col].tolist(), df[ground_truth_col].tolist(), lang="en", rescale_with_baseline=True)
+        #    df[f"BERTScore_F1_{col}"] = F
+
+        # --- ROUGE-L (textual overlap) ---
+        print("Computing ROUGE-L scores...")
+        rouge = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
+
+        def rougeL(hyp, ref):
+            return rouge.score(ref, hyp)["rougeL"].fmeasure
+
+        for col in compare_cols:
+            df[f"ROUGE_{col}_vs_{ground_truth_col}"] = [
+                rougeL(h, r) for h, r in zip(df[col], df[ground_truth_col])
+            ]
+
+        # --- BLEU Score (syntactic similarity) ---
+
+        print("Computing BLEU scores...")
+        smoothie = SmoothingFunction().method4
+
+        def compute_bleu(candidate, reference):
+            candidate_tokens = candidate.split()
+            reference_tokens = reference.split()
+            try:
+                return sentence_bleu([reference_tokens], candidate_tokens, smoothing_function=smoothie)
+            except ZeroDivisionError:
+                return 0.0
+
+        for col in compare_cols:
+            df[f"BLEU_{col}_vs_{ground_truth_col}"] = [
+                compute_bleu(h, r) for h, r in zip(df[col], df[ground_truth_col])
+            ]
+        # "BERTScore_"
+        # --- Step 4: Summary Statistics ---
+        metric_cols = [c for c in df.columns if any(k in c for k in ["STS_", "ROUGE_", "BLEU_"])]
+        summary = df[metric_cols].describe().T.round(3)
+
+        print("\n===Summary of Semantic & Biomedical Similarity ===")
+        print(summary)
+
+        # --- Save outputs ---
+        df.to_csv(os.path.join(output_dir, "semantic_similarity_results.csv"), index=False)
+        summary.to_csv(os.path.join(output_dir, "semantic_similarity_summary.csv"))
+
+        print(f"\n Results saved to {output_dir}")
+
+        return df, summary
+
+    except Exception as e:
+        print(f"Error in semantic similarity pipeline: {e}")
+        return None, None

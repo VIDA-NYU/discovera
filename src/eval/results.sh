@@ -1,37 +1,53 @@
 #!/bin/bash
-set -euo pipefail
+# ==========================================================
+# Purpose:
+#   Wrapper to run the semantic similarity analysis script.
+#   Computes STS and ROUGE-L between model-generated outputs
+#   and the specified ground truth column.
+#
+# Usage:
+#   bash run_similarity.sh
+# ==========================================================
+
+# Exit immediately if a command exits with a non-zero status
+set -e
 
 # -----------------------------
-# Parameters
+# User-configurable parameters
 # -----------------------------
-EXPERIMENT="gpt-5_20250923_225017"
-BENCHMARK="../../data/benchmark/benchmark.csv"
-# Models/providers you want to test
-MODELS=("gpt-5")
-
-# Report sources to compare
-BASES=("groundtruth")
-COMPARES=(
-    #"discovera(gpt-4o)" "llm(gpt-4o)"
-    "biomni"
-    )
+INPUT_PATH="../../data/benchmark/benchmark.csv"
+OUTPUT_DIR="../../output/"
+STS_MODEL="dmlls/all-mpnet-base-v2-negation"
+GROUND_TRUTH_COL="Ground Truth"
+COMPARE_COLS=("Discovera (gpt-4o)" "Biomni" "LLM (gpt-4o)")
 
 # -----------------------------
-# Run analysis for each combo
+# Script location
 # -----------------------------
-for BASE in "${BASES[@]}"; do
-  for COMPARE in "${COMPARES[@]}"; do
-    for MODEL in "${MODELS[@]}"; do
-      echo ">>> Running analysis for base=$BASE vs compare=$COMPARE with model=$MODEL"
+SCRIPT_PATH="./results.py"
 
-      python analyze_answers.py \
-        --experiment "$EXPERIMENT" \
-        --base "$BASE" \
-        --compare "$COMPARE" \
-        --model "$MODEL"
-    done
-  done
-done
+# -----------------------------
+# Run the similarity script
+# -----------------------------
+echo "===================================================="
+echo " Running Semantic Similarity Analysis "
+echo "----------------------------------------------------"
+echo " Input file:        $INPUT_PATH"
+echo " Output directory:  $OUTPUT_DIR"
+echo " Ground truth col:  $GROUND_TRUTH_COL"
+echo " Compare columns:   ${COMPARE_COLS[*]}"
+echo " Model:             $STS_MODEL"
+echo "===================================================="
+echo
 
-echo "All analyses completed!"
+python results.py \
+  --input_path "$INPUT_PATH" \
+  --output_dir "$OUTPUT_DIR" \
+  --sts_model "$STS_MODEL" \
+  --ground_truth_col "$GROUND_TRUTH_COL" \
+  --compare_cols "${COMPARE_COLS[@]}"
 
+echo
+echo "Analysis complete! Results saved to:"
+echo "   $OUTPUT_DIR"
+echo "===================================================="
