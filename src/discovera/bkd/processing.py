@@ -1,4 +1,3 @@
-
 def group_edges(edges, grouping):
     """
     Groups the edges DataFrame by predefined grouping types and counts occurrences.
@@ -12,7 +11,7 @@ def group_edges(edges, grouping):
 
     Returns:
         pd.DataFrame: A grouped DataFrame with a count column, sorted by count and type.
-    
+
     Raises:
         ValueError: If an invalid group_type is provided.
     """
@@ -21,12 +20,14 @@ def group_edges(edges, grouping):
     group_options = {
         "summary": ["nodes"],
         "detailed": ["nodes", "type", "subj.name", "obj.name"],
-        "view": ["nodes", "type"]
+        "view": ["nodes", "type"],
     }
 
     # Validate group_type
     if grouping not in group_options:
-        raise ValueError(f"Invalid group_type '{grouping}'. Choose from {list(group_options.keys())}.")
+        raise ValueError(
+            f"Invalid group_type '{grouping}'. Choose from {list(group_options.keys())}."
+        )
 
     group_columns = group_options[grouping]
 
@@ -36,9 +37,11 @@ def group_edges(edges, grouping):
 
     # Perform grouping and counting
     result = edges.groupby(group_columns).size().reset_index(name="count")
-    
+
     # Sort dynamically: count descending, other columns ascending
     sort_columns = ["count"] + [col for col in group_columns if col != "count"]
-    result = result.sort_values(by=sort_columns, ascending=[False] + [True] * (len(sort_columns) - 1))
-    
+    result = result.sort_values(
+        by=sort_columns, ascending=[False] + [True] * (len(sort_columns) - 1)
+    )
+
     return result

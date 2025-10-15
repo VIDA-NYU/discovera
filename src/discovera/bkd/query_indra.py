@@ -34,7 +34,9 @@ def retry_on_failure(func, max_retries=3, wait_time=5, **kwargs):
             return func(**kwargs)
         except Exception as e:
             if "502 Bad Gateway" in str(e):
-                print(f"502 Bad Gateway encountered. Retrying {attempt + 1}/{max_retries}...")
+                print(
+                    f"502 Bad Gateway encountered. Retrying {attempt + 1}/{max_retries}..."
+                )
                 time.sleep(wait_time * (attempt + 1))  # Exponential backoff
             else:
                 raise e  # Raise other exceptions immediately
@@ -53,9 +55,9 @@ def expand_and_flatten(state_json):
     - A DataFrame where nested structures are expanded into multiple rows.
     """
     flat_data = json_normalize(state_json)
-    if 'evidence' in state_json:
-        evidence_df = json_normalize(state_json['evidence'])
-        expanded_df = flat_data.merge(evidence_df, how='cross')
+    if "evidence" in state_json:
+        evidence_df = json_normalize(state_json["evidence"])
+        expanded_df = flat_data.merge(evidence_df, how="cross")
     else:
         expanded_df = flat_data
 
@@ -182,15 +184,17 @@ def nodes_batch(nodes):
         # Process the nodes and extract edges
         edge_extra = EdgeExtractor(nodes)
         statements = edge_extra.extract_edges()
-        
+
         if not statements.empty:
             # Add a new column 'nodes' to the statements DataFrame with the current nodes
             statements = statements.assign(nodes=[tuple(nodes)] * len(statements))
             return statements
         else:
-            print(f"⚠️ No edges found for nodes: {nodes}")  # Print nodes with empty results
+            print(
+                f"⚠️ No edges found for nodes: {nodes}"
+            )  # Print nodes with empty results
             return None
-        
+
     except Exception as e:
         print(f"❌ An error occurred while processing nodes {nodes}: {e}")
         return None
@@ -215,18 +219,22 @@ def normalize_nodes(nodes):
 
         # Split by commas and clean spaces/quotes
         return [node.strip(" \"'") for node in nodes.split(",")]
-    
+
     elif isinstance(nodes, list):
         # If list contains a single string, treat it like a string case
         if len(nodes) == 1 and isinstance(nodes[0], str):
-            return normalize_nodes(nodes[0])  
+            return normalize_nodes(nodes[0])
         return [node.strip(" \"'") for node in nodes]  # Clean quotes from each item
-    
+
     elif isinstance(nodes, tuple):
-        return [node.strip(" \"'") for node in nodes]  # Convert tuple to list & clean quotes
+        return [
+            node.strip(" \"'") for node in nodes
+        ]  # Convert tuple to list & clean quotes
 
     else:
-        raise ValueError("Invalid input format for nodes. Use a string, list, or tuple.")
+        raise ValueError(
+            "Invalid input format for nodes. Use a string, list, or tuple."
+        )
 
 
 def bulk_edges(nodes, size):
@@ -245,14 +253,18 @@ def bulk_edges(nodes, size):
     """
 
     results = []
-    
+
     nodes = normalize_nodes(nodes)
 
     nodes_lists = list(combinations(nodes, r=int(size)))
 
     with ThreadPoolExecutor() as executor:
         # Map the nodes_lists to the executor for parallel processing
-        for statements in tqdm(executor.map(nodes_batch, nodes_lists), total=len(nodes_lists), desc="Processing nodes"):
+        for statements in tqdm(
+            executor.map(nodes_batch, nodes_lists),
+            total=len(nodes_lists),
+            desc="Processing nodes",
+        ):
             if statements is not None:
                 results.append(statements)
 
@@ -260,39 +272,47 @@ def bulk_edges(nodes, size):
         combined_df = pd.concat(results, ignore_index=True)
         # Select only the desired columns from the combined DataFrame
         selected_columns = [
-            "nodes", "type", "subj.name", "obj.name", "belief", "text",
-            "text_refs.PMID", "text_refs.DOI", "text_refs.PMCID",
-            "text_refs.SOURCE", "text_refs.READER"
+            "nodes",
+            "type",
+            "subj.name",
+            "obj.name",
+            "belief",
+            "text",
+            "text_refs.PMID",
+            "text_refs.DOI",
+            "text_refs.PMCID",
+            "text_refs.SOURCE",
+            "text_refs.READER",
         ]
         # Ensure that the columns exist before selecting to avoid KeyErrors
-        existing_columns = [col for col in selected_columns if col in combined_df.columns]
+        existing_columns = [
+            col for col in selected_columns if col in combined_df.columns
+        ]
         combined_df = combined_df[existing_columns]
-        combined_df['url'] = 'https://doi.org/' + combined_df['text_refs.DOI']
+        combined_df["url"] = "https://doi.org/" + combined_df["text_refs.DOI"]
 
         # TODO: check if this is the best way to handle this
         # Step 1: Pick one row with highest belief per unique 'type'
-        type_representatives = (
-            combined_df.sort_values('belief', ascending=False)
-            .drop_duplicates(subset='type', keep='first')
-        )
+        type_representatives = combined_df.sort_values(
+            "belief", ascending=False
+        ).drop_duplicates(subset="type", keep="first")
 
         # Step 2: Exclude already selected rows
         remaining_df = combined_df.drop(type_representatives.index)
 
         # Step 3: Track used subj and obj names
-        used_subj = set(type_representatives['subj.name'])
-        used_obj = set(type_representatives['obj.name'])
+        used_subj = set(type_representatives["subj.name"])
+        used_obj = set(type_representatives["obj.name"])
 
         # Step 4: Define mask to prioritize diverse subj/obj
         remaining_df = remaining_df.assign(
-            is_new_subj=~remaining_df['subj.name'].isin(used_subj),
-            is_new_obj=~remaining_df['obj.name'].isin(used_obj)
+            is_new_subj=~remaining_df["subj.name"].isin(used_subj),
+            is_new_obj=~remaining_df["obj.name"].isin(used_obj),
         )
 
         # Step 5: Sort by new subj/obj and belief
         remaining_df = remaining_df.sort_values(
-            by=['is_new_subj', 'is_new_obj', 'belief'],
-            ascending=[False, False, False]
+            by=["is_new_subj", "is_new_obj", "belief"], ascending=[False, False, False]
         )
 
         # Step 6: Select additional rows to make total 20
@@ -300,11 +320,14 @@ def bulk_edges(nodes, size):
         additional_rows = remaining_df.head(additional_needed)
 
         # Combine and reset index
-        final_df = pd.concat([type_representatives, additional_rows]).reset_index(drop=True)
+        final_df = pd.concat([type_representatives, additional_rows]).reset_index(
+            drop=True
+        )
 
         return final_df
     else:
         return pd.DataFrame()
+
 
 # import pandas as pd
 # from itertools import combinations
@@ -380,23 +403,19 @@ def bulk_edges(nodes, size):
 def query_indra_networ(source=None, target=None, response_format="json"):
     """
     Queries the INDRA API with specified source and target entities.
-    
+
     Parameters:
         source (str, optional): The source entity (e.g., a gene or protein name). Defaults to None.
         target (str, optional): The target entity. Defaults to None.
         response_format (str): The format of the response. Defaults to "json".
-    
+
     Returns:
         dict: The API response in JSON format if successful, else an error message.
     """
-    url = 'https://network.indra.bio/api/query'  # INDRA API endpoint
-    
-    payload = {
-        "source": source,
-        "target": target,
-        "format": response_format
-    }
-    
+    url = "https://network.indra.bio/api/query"  # INDRA API endpoint
+
+    payload = {"source": source, "target": target, "format": response_format}
+
     try:
         response = requests.post(url, json=payload)
         response.raise_for_status()  # Raise an error for HTTP issues
@@ -408,10 +427,10 @@ def query_indra_networ(source=None, target=None, response_format="json"):
 def query_bulk_pairs(pairs):
     """
     Queries INDRA API for multiple source-target relationships.
-    
+
     Parameters:
         pairs (list of tuples): List of (source, target) pairs.
-    
+
     Returns:
         list: List of responses from the INDRA API.
     """
@@ -439,17 +458,9 @@ def explain_downstream(source, targets, id_type="hgnc.symbol"):
         print(results)
     """
     url = "https://discovery.indra.bio/api/explain_downstream"
-    payload = {
-        "source": source,
-        "targets": targets,
-        "id_type": id_type
-    }
-    headers = {
-        "Content-Type": "application/json"
-    }
+    payload = {"source": source, "targets": targets, "id_type": id_type}
+    headers = {"Content-Type": "application/json"}
 
     response = requests.post(url, json=payload, headers=headers)
     response.raise_for_status()
     return response.json()
-
-    
