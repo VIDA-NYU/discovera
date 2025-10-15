@@ -7,6 +7,7 @@ import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
+import blitzgsea as blitz
 import gseapy as gp
 import matplotlib.pyplot as plt
 import mygene
@@ -501,45 +502,55 @@ def rank_gsea(
     )
     rnk_data = data_sorted[[hit_col, corr_col]].dropna()
 
-    # Set index to hit_col
-    rnk_data.set_index(hit_col, inplace=True)
-
+    # Set index to hit_col (ONLY APPLICABLE FOR GSEApy)
+    # rnk_data.set_index(hit_col, inplace=True)
+    results_df = None
     try:
-        results = gp.prerank(
-            rnk=rnk_data,
-            gene_sets=gene_sets,
-            min_size=min_size,
-            max_size=max_size,
-            outdir=None,
-            verbose=True,
-            threads=16,
-        )
+
+        for gene_set in gene_sets:
+            lib = blitz.enrichr.get_library(gene_set)
+            print(f"Running GSEA for {gene_set}...")
+            res = blitz.gsea(
+                signature=rnk_data,
+                library=lib,
+                min_size=min_size,
+                max_size=max_size,
+            )
+            res_df = pd.DataFrame(res)
+            res_df.reset_index(inplace=True)
+            res_df.rename(
+                columns={
+                    "Term": "Pathway",
+                    "es": "ES",
+                    "nes": "NES",
+                    "pval": "NOS p-val",
+                    "fdr": "FDR q-val",
+                    "geneset_size": "Size",
+                    "leading_edge": "Lead_genes",
+                },
+                inplace=True,
+            )
+            res_df["Data Base"] = gene_set
+            res_df = res_df[
+                [
+                    "Data Base",
+                    "Pathway",
+                    "NES",
+                    "Size",
+                    "ES",
+                    "NOS p-val",
+                    "FDR q-val",
+                    "Lead_genes",
+                ]
+            ]
+            if results_df is None:
+                results_df = res_df
+            else:
+                results_df = pd.concat([results_df, res_df])
+
     except Exception as e:
         print(f"GSEA prerank failed: {e}")
         return pd.DataFrame()
-
-    results_df = pd.DataFrame(results.res2d)
-    print(results_df.head())
-    if results_df.empty:
-        print("GSEA returned no results.")
-        return results_df
-    if not isinstance(gene_sets, (list, tuple)):
-        gene_sets = [gene_sets]
-    if len(gene_sets) >= 2:
-        results_df[["Data Base", "Pathway"]] = results_df["Term"].str.split(
-            "__", expand=True
-        )
-    else:
-        if isinstance(gene_sets, list):
-            gene_sets = gene_sets[0]  # strip the brackets
-
-        results_df["Pathway"] = results_df["Term"]
-        results_df["Data Base"] = gene_sets
-
-    pval_columns = [
-        col for col in results_df.columns if "p-val" in col or "q-val" in col
-    ]
-    results_df = results_df[results_df[pval_columns].lt(threshold).any(axis=1)]
 
     save_with_timestamp(results_df, "gsea_results", timestamp)
     print(f"Number of matching results with p-val < {threshold}: {len(results_df)}")
@@ -550,7 +561,7 @@ def rank_gsea(
     top_combined = pd.concat([top_high_nes, top_low_nes]).drop_duplicates()
 
     plot_gsea_results(top_combined, timestamp)
-    return sorted_results
+    return results_df
 
 
 def classic_gsea(
