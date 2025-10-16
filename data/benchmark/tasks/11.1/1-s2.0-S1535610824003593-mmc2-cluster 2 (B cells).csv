@@ -1,0 +1,5 @@
+,gene,p_val,avg_log2FC,pct.1,pct.2,p_val_adj,cluster_number
+0,LY86,0.0,0.350630459,0.338,0.202,0.0,cluster 2 (B cells)
+1,BLK,0.0,0.282710944,0.33,0.211,0.0,cluster 2 (B cells)
+2,LTB,0.0,0.26923583,0.682,0.45,0.0,cluster 2 (B cells)
+3,MARCHF1,0.0,0.252485586,0.313,0.182,0.0,cluster 2 (B cells)
