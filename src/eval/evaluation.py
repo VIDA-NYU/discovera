@@ -509,7 +509,7 @@ def traditional_similarity_metrics(
         print(summary)
 
         # --- Save outputs ---
-        df.to_csv(os.path.join(output_dir, "sesmantic_similarity_pertask.csv"), index=False)
+        df.to_csv(os.path.join(output_dir, "semantic_similarity_pertask.csv"), index=False)
         summary.to_csv(os.path.join(output_dir, "semantic_similarity_overall.csv"))
 
         print(f"\n Results saved to {output_dir}")

@@ -6,7 +6,7 @@
 #   and the specified ground truth column.
 #
 # Usage:
-#   bash run_similarity.sh
+#   bash results.sh
 # ==========================================================
 
 # Exit immediately if a command exits with a non-zero status
@@ -19,7 +19,7 @@ INPUT_PATH="../../data/benchmark/benchmark.csv"
 OUTPUT_DIR="../../output/"
 STS_MODEL="dmlls/all-mpnet-base-v2-negation"
 GROUND_TRUTH_COL="Ground Truth"
-COMPARE_COLS=("Discovera (gpt-4o)" "Biomni" "LLM (gpt-4o)")
+COMPARE_COLS=("LLM (gpt-4o)" "Discovera (gpt-4o)" "Biomni")
 
 # -----------------------------
 # Script location
