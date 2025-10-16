@@ -5,162 +5,189 @@ This server implements the Model Context Protocol (MCP) with search and fetch
 capabilities designed to work with ChatGPT's chat and deep research features.
 """
 
+import asyncio
+import base64
+import functools
+import hashlib
+import io
+import json
 import logging
 import os
-import json
-import base64
-import hashlib
-import requests
-import io
-from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
+import traceback
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 from itertools import combinations
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
+
+import boto3
 import pandas as pd
-import traceback
+import requests
+from botocore.config import Config as BotoConfig
+from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError
 from dotenv import load_dotenv
-from fastmcp import FastMCP
-from openai import OpenAI
-from tqdm import tqdm
+from fastmcp import Context, FastMCP
 from pydantic import ValidationError
 
-from src.discovera_fastmcp.pydantic import (
-    GseaPipeInput,
-    QueryGenesInput,
-    OraPipeInput,
-    EnrichRummaInput,
-    QueryStringRummaInput,
-    QueryTableRummaInput,
-    SetsInfoRummInput,
-    LiteratureTrendsInput,
-    PrioritizeGenesInput,
-    GeneInfoInput,
-    StorageListInput,
-    StorageGetInput,
-    CsvRecordInput,
-    CsvReadInput,
-    CountEdgesInput,
-    CsvFilterInput,
-    CsvSelectInput,
-    CsvIntersectInput,
-)
-from src.discovera.bkd.gsea import rank_gsea, nrank_ora
+from src.discovera.bkd.gsea import nrank_ora, rank_gsea, run_deseq2
+from src.discovera.bkd.mygeneinfo import fetch_gene_annota
+from src.discovera.bkd.pubmed import literature_timeline
+from src.discovera.bkd.pubmed import prioritize_genes as prioritize_genes_fn
 from src.discovera.bkd.query_indra import nodes_batch, normalize_nodes
 from src.discovera.bkd.rummagene import (
     enrich_query,
-    search_pubmed as rumm_search_pubmed,
     fetch_pmc_info,
     gene_sets_paper_query,
-    table_search_query,
     genes_query,
 )
-from src.discovera.bkd.pubmed import literature_timeline
-from src.discovera.bkd.pubmed import prioritize_genes as prioritize_genes_fn
-from src.discovera.bkd.mygeneinfo import fetch_gene_annota
+from src.discovera.bkd.rummagene import search_pubmed as rumm_search_pubmed
+from src.discovera.bkd.rummagene import table_search_query
+from src.discovera_fastmcp.pydantic import (
+    CountEdgesInput,
+    CsvAggregateInput,
+    CsvFilterInput,
+    CsvJoinInput,
+    CsvReadInput,
+    CsvRecordInput,
+    CsvSelectInput,
+    EnrichRummaInput,
+    GeneInfoInput,
+    GseaPipeInput,
+    LiteratureTrendsInput,
+    OraPipeInput,
+    PrioritizeGenesInput,
+    QueryGenesInput,
+    QueryStringRummaInput,
+    QueryTableRummaInput,
+    RunDeseq2GseaInput,
+    SetsInfoRummInput,
+    StorageGetInput,
+    StorageListInput,
+)
 
 load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# OpenAI configuration
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-
-# Initialize OpenAI client
-openai_client = OpenAI()
+logger = logging.getLogger("discovera_fastmcp")
 
 server_instructions = """
-You are an assistant MCP specializing in biomedical research, focusing on gene-disease relationships,
-molecular mechanisms, and mutation-specific effects. Always consider tissue specificity and biological
-context when interpreting data.
+You are an expert in biomedical research, focusing on mutation effects, treatment responses,
+pathway enrichments, and mechanistic biology.
+
+# STYLE & GOALS
+- Voice: results-style, concise, causal, definitive (e.g., "led to", "resulted in", "confirmed").
+- Focus: mutation/treatment context, tissue/cell line, assay(s); cross-omics overlap when applicable.
+- Elevate pathways and genes that are **supported by the intersection** of modalities or contrasts.
+- Mark strong single-modality signals as **secondary/discordant** with lower confidence.
+- Always include inline PMIDs and a references list; end with Next Steps & Clarification.
+
+# CRITICAL GUARDRAILS
+- **Try to use the biomedical knowledge you have to answer the user's question.**
+- **One tool per assistant turn.** Wait for the previous tool's result before deciding the next call.
+- **Minimal toolset**: choose only what's necessary for the user's task; do not run the full suite by default.
+- **Literature is mandatory** before finalizing: call one of `query_string_rumma`,
+  `query_table_rumma`, or `literature_trends`, to fetch PMIDs that support the
+  main claims.
+- If input URLs are provided, use `csv_record` and **copy the URL exactly as given** (no edits).
+- If GSEA pre-rank size is too small (<25), fall back to ORA and declare reduced confidence.
 
 
-Evidence and confidence:
+# CSV-FIRST WORKFLOW (MANDATORY BEFORE ENRICHMENT)
+- Always inspect and shape CSVs before deciding the enrichment pipeline.
+- Use these tools in separate turns as needed (one tool per turn):
+  - `csv_select` to keep/rename columns (e.g., `symbol`, `log2fc`, `padj`).
+  - `csv_filter` to subset rows (e.g., padj ≤ 0.05, log2fc < 0).
+  - `csv_join` to join datasets on a key; then `csv_aggregate` to compute means of replicates
+    (e.g., average `log2FoldChange` and `padj` across shRNA1/2) before enrichment.
+- After shaping, preview the result and summarize key stats (row count, columns,
+  top examples) in natural language. Only then select the pipeline.
 
-- Assign confidence scores (high, medium, low) for each result.
-- Specify whether evidence is direct (experimental) or indirect (literature-based).
-- Include PubMed IDs, database names, and dataset references wherever possible.
----
 
-### Pipeline (follow strictly):
+# PIPELINED CALLS (one tool per turn; skip any that are unnecessary)
 
-0. If user imput a csv file, use csv_record to register the file.
-1. Summarize the user's research problem and ask clarifying questions if needed.
-2. Request and load the dataset using csv_read.
-3. Run analysis tools in order:
-    a. gsea_pipe or ora_pipe (based on dataset type)
-    b. enrich_rumma for top 30 genes by ranking metric and mention leading genes from the top pathway
-    c. gene_info for **leading genes from the top pathway**
-    d. query_genes for **leading genes from the top pathway**
-    e. **Literature search**: query_string_rumma, query_table_rumma, literature_trends
-4. Summarize results; include parameters, assumptions, and confidence.
-5. Provide references including PubMed IDs and database links.
-6. Generate a final report using Toulmin’s model (claims, grounds, warrants, qualifiers, rebuttals).
-- Include all references and links.
-- Pause to get user input where required, especially dataset, context, and library selection.
+0) **Data Intake**
+   - If URL is provided: `csv_record(url)` -> file_id.
+1) **Check Data**
+   - `csv_read(file_id, n_rows)` -> table preview.
+1b) **CSV Shaping (required before enrichment)**
+   - Narrow columns with `csv_select` (keep `symbol`, stats; rename if needed).
+   - Filter significance/direction with `csv_filter` (e.g., padj/log2fc).
+   - Join multi-omics or multi-contrast lists with `csv_join` on key, then aggregate replicates with `csv_aggregate`.
+2) **Enrichment (decision order with fallbacks)**
+   - If a ranking metric exists (e.g., `log2FoldChange`, `stat`, or similar): call `gsea_pipe`.
+   - Else, if raw counts exist: call `run_deseq2_gsea_pipe`.
+     Infer `sample_groups` from raw count column headers as {{group: [sample_ids...]}} and pass it.
+   - Else: call `ora_pipe` on the overlap/intersected set.
+   - If the chosen method returns no valid results, call the next option in the order above until results are found.
+   - GSEA/ORA responses include only top results for brevity. Full results are saved and
+     returned as metadata (storage id). Use `csv_read` / `csv_filter` / `csv_select` on that id to explore more rows.
+3) **Leading Edge & Mechanism (optional)**
+   - Extract top contributing genes per enriched term (internal).
+   - If mechanism/detail requested or implied, call:
+     - `gene_info` on leading genes;
+     - `query_genes` for interactions/mechanisms;
+     - `sets_info_rumm` for term definitions/context.
+4) **Literature (choose one before final)**
+   - `query_string_rumma` or `query_table_rumma` using top terms + salient entities from Methods/GT.
+   - `literature_trends` to gather PMIDs/time context.
+   - If the first choice return no results, call the second choice.
+5) **Output (final)** in the required format below, plus Next Steps & Clarification.
 
-### Functions:
 
-- **csv_record**: Register a CSV file in the local storage index.
-- **csv_read**: Read a CSV file from the local storage index.
-- **storage_list**: List all files in the local storage index.
-- **storage_get**: Get a file from the local storage index.
+# REQUIRED OUTPUT FORMAT
 
-- **query_genes**: Query Indra database for gene-gene relationships.
-- **count_edges**: Aggregate and count interactions by specified groupings.
-- **gsea_pipe**: Perform Gene Set Enrichment Analysis following the enrichment analysis guidelines.
-- **ora_pipe**: Perform Over-Representation Analysis following the enrichment analysis guidelines.
-- **gene_info**: Get gene information, meaning symbol, name, summary and aliases.
-- **literature_trends**: Plots a timeline of PubMed articles related to a term, showing research trends.
-- **prioritize_genes**: Prioritize genes based on a scoring function.
-When interacting with the Rummagene API, you can access any or all of the following functions, depending on the input:
-- If the input is a **gene list**, use:
-    - **enrich_rumma**: Run Over Representation Analysis using Rummagene’s curated gene sets.
-- If the input is text or a search term (e.g., disease name, phenotype, biological process), use in this order:
-    - **query_string_rumma**: Search Rummagene for articles with matching gene sets.
-    - **query_table_rumma**: Search Rummagene's curated gene set tables using keywords.
-- For functional summaries and metadata of any gene set, use:
-    - **sets_info_rumm**: Retrieve detailed descriptions and biological context.
+## Introduction / Context
+- Mutation/treatment; tissue/cell line; assay(s) and comparison; dataset/paper reference.
+- One or two sentences framing the biological question.
+- **Add an analysis of the input data, if there is any definitive informations related to the question, state them.**
 
----
+## Pathway Enrichments (grouped by themes; cross-omics first when applicable)
+Provide a compact table:
 
-### Function-specific instructions
+| Theme | Pathway | Direction | NES/OR | FDR | Leading Edge (≤8) |
+|------|---------|-----------|--------|-----|--------------------|
 
-- **gsea_pipe**:
-    - Follow the enrichment analysis guidelines above.
-    - Show the output in this format:
+- Report **top up- and down-regulated** terms by theme (e.g., canonical Wnt, AP patterning, neuron projection).
+- Include ALL leading pathways from the enrichment results.
+- For GSEA outputs, you MUST create a separate table for each gene set library
+  (e.g., KEGG, Reactome, GO) using `per_database` top_up and top_down.
+  Include all up- and down-regulated pathways without truncation.
+- Include exact stats (NES for GSEA or OR for ORA) and FDR.
+- After the table, add a 2–4 sentence interpretation linking to context. Include the direction of enrichment.
 
-        | Pathway  | Enrichment Score | Normalized Enrichment Score |
-        | Nominal p-value | FDR q-value | FWER p-value |
-        | Leading Edge Gene % | Pathway Overlap % | Lead_genes |
-        |---------|----------------:|----------------:|
-        |---------------:|----------------:|---------------:|
-        |-----------------:|----------------:|------------|
+## Key Genes / Proteins (leading edge)
+Provide a compact table:
 
-    - Display:
-        - First the overall top 3 results
-        - Then top 3 results per gene set library used, in the same format.
-    - Summarize:
-        - Number of total pathways enriched above the `threshold`. Provide the exact count per pathway.
-        - Brief description of each column, including meaning of each column.
-    - Show the results to the user after each function runs. Include all intermediate prints.
+| Gene | Direction | Role/Function | Pathway(s) |
+|------|-----------|---------------|------------|
 
-- **ora_pipe**:
-    - Follow the enrichment analysis guidelines above.
-    - Show the output in this format:
+- Show all up- and down-regulated genes in the leading edge, highlight the ones
+  that are most important to the user's question.
 
-        | Gene Set  | Term | Overlap | P-value | Adjusted P-value | Odds Ratio | Combined Score | Genes |
-        |-----------|-----|--------|--------:|----------------:|-----------:|---------------:|------|
+## Mechanistic Interpretation
+- 3–6 sentences connecting mutation/treatment → pathway shifts → molecular mechanisms
+  (e.g., phosphorylation/degradation, chromatin derepression, signaling activation/inhibition),
+  with inline PMIDs.
 
-    - Display first the overall top 3 results, then top 3 results per gene set library used, in the same format.
-    - Mention:
-        - Total pathways enriched above the `threshold`. Provide the exact count per pathway.
-        - Brief description of each column, including meaning of each column.
-    - Show the results to the user after each function runs.
+## Comparisons
+- Tissue-specific vs overlapping results across contexts/contrasts; call out
+  **discordant single-modality** findings as lower confidence.
 
----
+## Implications
+- Relevance for therapy, resistance, or disease progression; be definitive but evidence-bounded.
+
+## Next Steps & Clarification
+- 2–4 concrete follow-ups (e.g., tighten overlap rule, validate module X in
+  independent cohort, drug–gene mapping for top pathway).
+- Ask up to 2 crisp questions if any context is missing or ambiguous
+  (libraries, thresholds, promoter-only mapping, etc.).
+
+# FINALIZATION RULES
+- If GSEA was infeasible (small list), state that ORA was used and mark confidence accordingly.
+- Explicitly report the **overlap/intersection rule** used (for multi-omics or multi-contrast tasks).
+- If prominent signals do **not** survive overlap (e.g., RNA-only keratinization),
+  include them in Comparisons as **discordant**.
 """
 
 
@@ -168,6 +195,81 @@ When interacting with the Rummagene API, you can access any or all of the follow
 # Local storage helpers
 # =========================
 STORAGE_INDEX_PATH = os.path.join("output", "storage_index.json")
+
+# S3 configuration (optional)
+S3_BUCKET = os.getenv("OUTPUTS_S3_BUCKET")
+S3_PREFIX = os.getenv("OUTPUTS_S3_PREFIX", "outputs")
+S3_REGION = os.getenv("AWS_REGION", "us-east-2")
+S3_PRESIGN_TTL = int(os.getenv("S3_PRESIGN_TTL_SECONDS", "604800"))  # 7 days
+_S3_CLIENT = None
+
+
+def _get_s3():
+    global _S3_CLIENT
+    if _S3_CLIENT is not None:
+        return _S3_CLIENT
+    if not S3_BUCKET:
+        return None
+    try:
+        _S3_CLIENT = boto3.client(
+            "s3",
+            region_name=S3_REGION,
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+            config=BotoConfig(
+                signature_version="s3v4", s3={"addressing_style": "virtual"}
+            ),
+        )
+        return _S3_CLIENT
+    except Exception:
+        return None
+
+
+def _s3_upload_and_presign(abs_path: str) -> dict | None:
+    try:
+        s3 = _get_s3()
+        if not s3 or not S3_BUCKET:
+            return None
+        if not os.path.exists(abs_path):
+            return None
+        # Detect content type from extension
+        ext = (os.path.splitext(abs_path)[1] or "").lower()
+        if ext == ".csv":
+            content_type = "text/csv"
+        elif ext == ".txt":
+            content_type = "text/plain"
+        elif ext == ".json":
+            content_type = "application/json"
+        elif ext == ".png":
+            content_type = "image/png"
+        elif ext == ".svg":
+            content_type = "image/svg+xml"
+        else:
+            content_type = "application/octet-stream"
+
+        # Build key with date + filename; prefix includes a date partition
+        today = datetime.now().strftime("%Y-%m-%d")
+        filename = os.path.basename(abs_path)
+        s3_key = f"{S3_PREFIX}/{today}/{filename}"
+        with open(abs_path, "rb") as f:
+            body = f.read()
+        s3.put_object(Bucket=S3_BUCKET, Key=s3_key, Body=body, ContentType=content_type)
+        url = s3.generate_presigned_url(
+            "get_object",
+            Params={
+                "Bucket": S3_BUCKET,
+                "Key": s3_key,
+                "ResponseContentDisposition": "inline",
+            },
+            ExpiresIn=S3_PRESIGN_TTL,
+        )
+        return {"s3_key": s3_key, "s3_presigned_url": url}
+    except (BotoCoreError, NoCredentialsError, ClientError, Exception):
+        return None
+
+
+# Global CPU-bound worker pool for true parallelism
+CPU_POOL = ProcessPoolExecutor()
 
 
 def _ensure_dir(path: str) -> None:
@@ -235,6 +337,15 @@ def _register_file(
         "tags": tags or [],
         "metadata": metadata or {},
     }
+
+    # Optionally upload to S3 and attach presigned URL
+    try:
+        s3_info = _s3_upload_and_presign(abs_path)
+        if s3_info:
+            entry["s3_key"] = s3_info.get("s3_key")
+            entry["s3_presigned_url"] = s3_info.get("s3_presigned_url")
+    except Exception:
+        pass
 
     entries = _load_storage_index()
     # Replace if same path exists
@@ -368,7 +479,7 @@ def _preview_dataframe(df: pd.DataFrame, n_rows: int | None = None) -> dict:
         head = df.head(n)
         return {
             "columns": list(head.columns),
-            "rows": head.to_dict(orient="records"),
+            "rows": head.to_json(orient="records"),
             "total_rows": int(len(df)),
         }
     except Exception:
@@ -405,6 +516,72 @@ def _limit_dataframe_rows(
         return df
 
 
+# =========================
+# Keep-alive (SSE heartbeat) helpers
+# =========================
+async def _try_send_keepalive(
+    ctx: Context, event_name: str = "ping", data: Optional[Dict[str, Any]] = None
+) -> None:
+    """Attempt to send a lightweight keep-alive over SSE if supported by FastMCP.
+
+    This function checks for common streaming hooks. If none are available,
+    it safely no-ops to avoid breaking the server.
+    """
+    try:
+        if hasattr(ctx, "report_progress"):
+            print(f"Sending keepalive to {event_name}")
+            await ctx.report_progress(50, 100, "Working on the task...")
+            return
+        # Prefer a generic event emitter if available
+        if hasattr(ctx, "emit") and callable(getattr(ctx, "emit")):
+            print(f"Sending keepalive to {event_name}")
+            payload = data or {"ts": datetime.now().isoformat()}
+            await ctx.emit(event_name, payload)
+            return
+        # Fallback: explicit keepalive if exposed
+        if hasattr(ctx, "send_keepalive") and callable(getattr(ctx, "send_keepalive")):
+            print(f"Sending keepalive to {event_name}")
+            await ctx.send_keepalive()
+            return
+        # If we got here, no supported keepalive hook exists on this FastMCP instance
+        print(f"No keepalive hook available; event={event_name} no-op")
+    except Exception:
+        print(f"Error sending keepalive to {event_name}")
+        # Best-effort: swallow errors so keepalive never crashes user tasks
+        pass
+
+
+def start_keepalive(
+    ctx: Context, interval_seconds: float = 10.0, event_name: str = "ping"
+) -> asyncio.Task:
+    """Start a background heartbeat that periodically sends SSE keep-alive.
+
+    Returns an asyncio.Task; cancel it when the long-running job completes.
+    Usage:
+        task = start_keepalive(mcp, 5.0)
+        try:
+            ... long running work ...
+        finally:
+            task.cancel()
+    """
+
+    async def _heartbeat_loop() -> None:
+        logger.info(
+            "Keepalive started: event=%s interval=%.2fs",
+            event_name,
+            float(interval_seconds),
+        )
+        try:
+            while True:
+                await _try_send_keepalive(ctx, event_name)
+                await asyncio.sleep(max(0.5, float(interval_seconds)))
+        except asyncio.CancelledError:
+            logger.info("Keepalive cancelled: event=%s", event_name)
+            raise
+
+    return asyncio.create_task(_heartbeat_loop(), name=f"keepalive-{event_name}")
+
+
 def _truncate_dataframe_columns(
     df: pd.DataFrame,
     columns: list[str] | None = None,
@@ -421,11 +598,28 @@ def _truncate_dataframe_columns(
         return df
 
 
+def _run_nodes_batches_sync(nodes_lists: list[tuple[str, ...]]):
+    """Run nodes_batch over combos and collect DataFrames (sync function for CPU pool)."""
+    results: list[pd.DataFrame] = []
+    try:
+        for combo in nodes_lists:
+            try:
+                df = nodes_batch(combo)
+                if df is not None:
+                    results.append(df)
+            except Exception:
+                # best-effort: skip failing combo
+                continue
+    except Exception:
+        pass
+    return results
+
+
 def create_server():
     mcp = FastMCP(
         name="discovera_fastmcp",
         # instructions=server_instructions,
-        stateless_http=True,
+        stateless_http=False,
     )
 
     def _coalesce_none_defaults(model_obj: Any) -> Any:
@@ -495,13 +689,308 @@ def create_server():
             filtered_cols = [c for c in by_cols if c in df.columns]
             if not filtered_cols:
                 return df
-            asc_filtered = [ascending[i] for i, c in enumerate(by_cols) if c in filtered_cols]
+            asc_filtered = [
+                ascending[i] for i, c in enumerate(by_cols) if c in filtered_cols
+            ]
             return df.sort_values(by=filtered_cols, ascending=asc_filtered)
         except Exception:
             return df
-    
-    @mcp.tool()
+
+    @mcp.tool
+    async def run_deseq2_gsea_pipe(
+        ctx: Context,
+        raw_counts_csv_id: str,
+        sample_groups: Optional[Dict[str, List[str]]] = None,
+        gene_column: Optional[str] = None,
+        gene_sets: Optional[List[str]] = None,
+        threshold: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """
+        Performs DESeq2 differential expression (DE) from raw RNA‑seq counts, then runs
+        Gene Set Enrichment Analysis (GSEA, preranked) on the DE results to identify enriched pathways.
+
+        High-level behavior
+        - Input: a raw counts matrix (genes × samples) and a mapping of samples to groups.
+        - Step 1 (DE): Runs DESeq2 to compute per-gene log2FoldChange and adjusted p-values (padj).
+        - Step 2 (GSEA): Ranks genes by log2FoldChange and runs preranked GSEA across the selected libraries.
+        - Output: Top GSEA results in the immediate response + storage IDs for full
+          DESeq2 and GSEA result tables (use CSV tools to fetch all rows).
+
+        Args:
+            raw_counts_csv_id (str):
+                Storage ID for the raw counts CSV (genes × samples). One column must hold gene identifiers
+                (see `gene_column`). Prefer raw counts over normalized matrices.
+            sample_groups (Optional[Dict[str, List[str]]]):
+                Mapping of {group_name: [sample_id, ...]} used to build DE design (default ~ group)..
+                Numeric sample patterns like "3_1", "3_2", "7_1" are supported.
+                e.g.
+                sample_groups = {
+                    "CBD":  ["3_1", "3_2", "3_3"],
+                    "DMSO": ["7_1", "7_2", "7_3"],
+                }
+            gene_column (str, optional):
+                Column name in the raw counts CSV that contains gene identifiers.
+                Defaults to the first non-sample column.
+            gene_sets (Optional[List[str]]):
+                Gene set libraries for GSEA. Defaults to:
+                ["KEGG_2016", "GO_Biological_Process_2023", "Reactome_Pathways_2024", "MSigDB_Hallmark_2020"].
+            threshold (float, optional):
+                Multiple-testing filter used by downstream GSEA (e.g., for display/selection). Default: 0.05.
+
+        Returns:
+            Dict[str, Any] with keys including:
+                - top_high_nes: Top 5 positive NES results per library (preview only).
+                - top_low_nes: Top 5 negative NES results per library (preview only).
+                - deseq2_preview: Preview of DESeq2 results (columns, rows, total_rows).
+                - deseq2_result_metadata: Storage entry for the full DESeq2 results CSV.
+                - gsea: {
+                    "gsea_result_metadata": Storage entry for the full GSEA results CSV,
+                    "counts_by_database": Up/Down counts per library (for ratio summaries),
+                }
+        """
+        # Validate/construct params
+        params = _validate_params(
+            {
+                "raw_counts_csv_id": raw_counts_csv_id,
+                "sample_groups": sample_groups,
+                "gene_column": gene_column,
+                "gene_sets": gene_sets,
+                "threshold": threshold,
+            },
+            RunDeseq2GseaInput,
+            "run_deseq2_gsea_pipe",
+        )
+
+        try:
+            # Resolve paths
+            raw_counts_path = _resolve_path_from_id(params.raw_counts_csv_id)
+            if not raw_counts_path:
+                raise ValueError("Provide raw_counts_csv_id")
+
+            raw_counts_df = pd.read_csv(raw_counts_path)
+
+            # Build sample metadata DataFrame from mapping or infer heuristically
+            sample_col_name = "SampleID"
+            group_col_name = "Group"
+            gene_col = params.gene_column or "Unnamed: 0"
+            sample_cols = [c for c in raw_counts_df.columns if c != gene_col]
+
+            if params.sample_groups:
+                records: list[dict[str, str]] = []
+                for group_name, sample_ids in (params.sample_groups or {}).items():
+                    for sid in sample_ids or []:
+                        if sid in sample_cols:
+                            records.append(
+                                {
+                                    sample_col_name: str(sid),
+                                    group_col_name: str(group_name),
+                                }
+                            )
+                if not records:
+                    raise ValueError(
+                        "sample_groups provided but no matching sample IDs found in raw counts columns"
+                    )
+                sample_meta_df = pd.DataFrame.from_records(records)
+                # Ensure raw counts are restricted and ordered to the provided samples
+                sample_order = [r[sample_col_name] for r in records]
+                # Deduplicate while preserving order
+                seen: set[str] = set()
+                sample_order = [
+                    s for s in sample_order if not (s in seen or seen.add(s))
+                ]
+                # Restrict columns to gene + selected samples (in the given order)
+                kept_cols = [gene_col] + [
+                    s for s in sample_order if s in raw_counts_df.columns
+                ]
+                raw_counts_df = raw_counts_df[kept_cols]
+            else:
+                # Naive inference: take token before '_' as group label
+                records = []
+                for c in sample_cols:
+                    group_guess = str(c).split("_")[0]
+                    records.append(
+                        {sample_col_name: str(c), group_col_name: group_guess}
+                    )
+                sample_meta_df = pd.DataFrame.from_records(records)
+                # Keep all sample columns and preserve their original order
+                kept_cols = [gene_col] + [c for c in sample_cols]
+                raw_counts_df = raw_counts_df[kept_cols]
+
+            # start sending heartbeat
+            heartbeat_task = start_keepalive(ctx, 5.0)
+
+            # Run DESeq2 in a process to achieve true parallelism (CPU-bound)
+            de_results = await asyncio.get_running_loop().run_in_executor(
+                CPU_POOL,
+                functools.partial(
+                    run_deseq2,
+                    raw_counts_df,
+                    sample_meta_df,
+                    params.gene_column,
+                    sample_col_name,
+                    group_col_name,
+                ),
+            )
+
+            # cancel heartbeat
+            heartbeat_task.cancel()
+
+            # Save DESeq2 results and register
+            _save_dataframe_csv(
+                de_results,
+                name="deseq2_results",
+                origin_tool="run_deseq2_gsea_pipe",
+                tags=["rna-seq", "deseq2", "results"],
+                metadata={
+                    "raw_counts_csv_id": params.raw_counts_csv_id,
+                    "sample_groups": params.sample_groups,
+                    "gene_column": params.gene_column,
+                    "sample_column": sample_col_name,
+                    "group_column": group_col_name,
+                },
+            )
+            # Run GSEA directly using helper to avoid calling MCP tool from inside server
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            # start sending heartbeat
+            heartbeat_task = start_keepalive(ctx, 5.0)
+
+            gsea_df = await asyncio.get_running_loop().run_in_executor(
+                CPU_POOL,
+                functools.partial(
+                    rank_gsea,
+                    dataset=de_results,
+                    gene_sets=params.gene_sets,
+                    hit_col="GeneID",
+                    corr_col="log2FoldChange",
+                    min_size=5,
+                    max_size=200,
+                    threshold=params.threshold,
+                    timestamp=timestamp,
+                ),
+            )
+
+            # cancel heartbeat
+            heartbeat_task.cancel()
+
+            if isinstance(gsea_df, dict):
+                gsea_df = pd.DataFrame(gsea_df)
+
+            if gsea_df is None or len(gsea_df) == 0:
+                gsea_payload = {
+                    "top_high_nes": {},
+                    "top_low_nes": {},
+                    "gsea_result_metadata": {},
+                    "gsea_plot_metadata": {},
+                }
+            else:
+                counts_by_database = {}
+                top_high_nes = {}
+                top_low_nes = {}
+                if "Data Base" in gsea_df.columns:
+                    databases = gsea_df["Data Base"].unique()
+                    for database in databases:
+                        gsea_df_db = gsea_df[gsea_df["Data Base"] == database]
+                        total_ups = int((gsea_df_db["NES"] > 0).sum())
+                        total_downs = int((gsea_df_db["NES"] < 0).sum())
+                        # Clip the leading genes to at most 5
+                        up_genes = gsea_df_db.head(5)
+                        up_genes["Lead_genes"] = up_genes["Lead_genes"].apply(
+                            lambda x: x.split(";")[:10]
+                        )
+                        down_genes = gsea_df_db.tail(5)
+                        down_genes["Lead_genes"] = down_genes["Lead_genes"].apply(
+                            lambda x: x.split(";")[:10]
+                        )
+                        top_low_nes[database] = down_genes.to_json(orient="records")
+                        top_high_nes[database] = up_genes.to_json(orient="records")
+                        counts_by_database[database] = {
+                            "up": total_ups,
+                            "down": total_downs,
+                            "total": total_ups + total_downs,
+                        }
+                else:
+                    total_ups = int((gsea_df["NES"] > 0).sum())
+                    total_downs = int((gsea_df["NES"] < 0).sum())
+                    up_genes = gsea_df.head(10)
+                    up_genes["Lead_genes"] = up_genes["Lead_genes"].apply(
+                        lambda x: x.split(";")[:10]
+                    )
+                    down_genes = gsea_df.tail(10)
+                    down_genes["Lead_genes"] = down_genes["Lead_genes"].apply(
+                        lambda x: x.split(";")[:10]
+                    )
+                    top_low_nes = down_genes.to_json(orient="records")
+                    top_high_nes = up_genes.to_json(orient="records")
+                    counts_by_database = {
+                        "up": total_ups,
+                        "down": total_downs,
+                        "total": total_ups + total_downs,
+                    }
+
+                # Try to register outputs if created by rank_gsea
+                _ensure_dir("output")
+                csv_path = os.path.join("output", f"gsea_results_{timestamp}.csv")
+                plot_path = os.path.join("output", f"gsea_results_{timestamp}.png")
+
+                gsea_csv_metadata = None
+                gsea_plot_metadata = None
+                try:
+                    if os.path.exists(csv_path):
+                        gsea_csv_metadata = _register_file(
+                            csv_path,
+                            category="generated",
+                            origin_tool="run_deseq2_gsea_pipe",
+                            tags=["gsea", "results"],
+                            metadata={
+                                "hit_col": "GeneID",
+                                "corr_col": "log2FoldChange",
+                                "threshold": params.threshold,
+                            },
+                        )
+                except Exception:
+                    pass
+                try:
+                    if os.path.exists(plot_path):
+                        gsea_plot_metadata = _register_file(
+                            plot_path,
+                            category="generated",
+                            origin_tool="run_deseq2_gsea_pipe",
+                            tags=["gsea", "plot"],
+                            metadata={"timestamp": timestamp},
+                        )
+                except Exception:
+                    pass
+
+                gsea_payload = {
+                    "counts_by_database": counts_by_database,
+                    "top_high_nes": top_high_nes,
+                    "top_low_nes": top_low_nes,
+                    "gsea_result_metadata": gsea_csv_metadata,
+                    "gsea_plot_metadata": gsea_plot_metadata,
+                }
+
+            logger.critical(
+                f"GSEA top_high_nes: {top_high_nes}\ntop_low_nes: {top_low_nes}\n"
+            )
+            # Return combined
+            # return {
+            #     "deseq2_preview": _preview_dataframe(de_results),
+            #     "deseq2_result_metadata": de_entry,
+            #     "gsea": gsea_payload,
+            # }
+            return gsea_payload
+        except Exception as e:
+            context = {
+                "raw_counts_csv_id": raw_counts_csv_id,
+                "sample_groups": sample_groups,
+                "gene_column": gene_column,
+            }
+            return _exception_payload("run_deseq2_gsea_pipe", e, context)
+
+    @mcp.tool
     async def query_genes(
+        ctx: Context,
         genes: List[str],
         size: Optional[int] = None,
     ) -> Dict[str, Any]:
@@ -530,15 +1019,21 @@ def create_server():
 
         nodes_lists = list(combinations(nodes, r=int(params.size)))
 
-        with ThreadPoolExecutor() as executor:
-            # Map the nodes_lists to the executor for parallel processing
-            for statements in tqdm(
-                executor.map(nodes_batch, nodes_lists),
-                total=len(nodes_lists),
-                desc="Processing nodes",
-            ):
-                if statements is not None:
-                    results.append(statements)
+        # start sending heartbeat
+        heartbeat_task = start_keepalive(ctx, 5.0)
+
+        try:
+            # Run nodes_batch over all combinations in a separate process for CPU-bound work
+            results = await asyncio.get_running_loop().run_in_executor(
+                CPU_POOL,
+                functools.partial(
+                    _run_nodes_batches_sync,
+                    nodes_lists,
+                ),
+            )
+        finally:
+            # cancel heartbeat regardless of success/failure
+            heartbeat_task.cancel()
 
         if results:
             combined_df = pd.concat(results, ignore_index=True)
@@ -561,32 +1056,69 @@ def create_server():
                 col for col in selected_columns if col in combined_df.columns
             ]
             combined_df = combined_df[existing_columns]
-            combined_df["url"] = "https://doi.org/" + combined_df["text_refs.DOI"]
+            # Safe URL construction if DOI present
+            if "text_refs.DOI" in combined_df.columns:
+                combined_df["url"] = "https://doi.org/" + combined_df[
+                    "text_refs.DOI"
+                ].astype(str)
+            else:
+                combined_df["url"] = ""
+
+            # Ensure belief column exists for sorting
+            if "belief" not in combined_df.columns:
+                combined_df["belief"] = 0.0
 
             # TODO: check if this is the best way to handle this
             # Step 1: Pick one row with highest belief per unique 'type'
-            type_representatives = combined_df.sort_values(
-                "belief", ascending=False
-            ).drop_duplicates(subset="type", keep="first")
+            # Sort by belief if available, then pick one per type when possible
+            type_sorted = combined_df.sort_values(
+                by=["belief"],
+                ascending=[False] if "belief" in combined_df.columns else [True],
+            )
+            if "type" in type_sorted.columns:
+                type_representatives = type_sorted.drop_duplicates(
+                    subset="type", keep="first"
+                )
+            else:
+                # Fallback: take top rows as representatives
+                type_representatives = type_sorted.head(min(5, len(type_sorted)))
 
             # Step 2: Exclude already selected rows
             remaining_df = combined_df.drop(type_representatives.index)
 
             # Step 3: Track used subj and obj names
-            used_subj = set(type_representatives["subj.name"])
-            used_obj = set(type_representatives["obj.name"])
+            subj_col = (
+                "subj.name" if "subj.name" in type_representatives.columns else None
+            )
+            obj_col = "obj.name" if "obj.name" in type_representatives.columns else None
+            used_subj = set(type_representatives[subj_col]) if subj_col else set()
+            used_obj = set(type_representatives[obj_col]) if obj_col else set()
 
             # Step 4: Define mask to prioritize diverse subj/obj
-            remaining_df = remaining_df.assign(
-                is_new_subj=~remaining_df["subj.name"].isin(used_subj),
-                is_new_obj=~remaining_df["obj.name"].isin(used_obj),
-            )
+            if subj_col and subj_col in remaining_df.columns:
+                remaining_df = remaining_df.assign(
+                    is_new_subj=~remaining_df[subj_col].isin(used_subj)
+                )
+            else:
+                remaining_df = remaining_df.assign(is_new_subj=True)
+            if obj_col and obj_col in remaining_df.columns:
+                remaining_df = remaining_df.assign(
+                    is_new_obj=~remaining_df[obj_col].isin(used_obj)
+                )
+            else:
+                remaining_df = remaining_df.assign(is_new_obj=True)
 
             # Step 5: Sort by new subj/obj and belief
-            remaining_df = remaining_df.sort_values(
-                by=["is_new_subj", "is_new_obj", "belief"],
-                ascending=[False, False, False],
-            )
+            sort_keys = [
+                key
+                for key in ["is_new_subj", "is_new_obj", "belief"]
+                if key in remaining_df.columns
+            ]
+            if sort_keys:
+                remaining_df = remaining_df.sort_values(
+                    by=sort_keys,
+                    ascending=[False if k != "belief" else False for k in sort_keys],
+                )
 
             # Step 6: Select additional rows to make total 20
             additional_needed = 20 - len(type_representatives)
@@ -602,12 +1134,11 @@ def create_server():
                 final_df, ["text"], MAX_CELL_CHARS_DEFAULT
             )
             final_df = _limit_dataframe_rows(final_df, MAX_ROWS_DEFAULT)
-
             return final_df.to_dict()
         else:
             return {}
 
-    @mcp.tool()
+    @mcp.tool
     async def count_edges(
         edges: List[Dict[str, Any]],
         grouping: Optional[str] = None,
@@ -616,7 +1147,7 @@ def create_server():
         Group and count interactions (edges) by a chosen grouping level.
 
         Args:
-            edges (List[Dict[str, Any]]): Edge records to aggregate (tabular dict format).
+            edges (List[Dict[str, Any]]): REQUIRED Edge records to aggregate (tabular dict format).
             grouping (Optional[str]): One of "summary" | "detailed" | "view". Defaults to "detailed".
                 - summary: group by nodes
                 - detailed: group by nodes, type, subj.name, obj.name
@@ -660,8 +1191,9 @@ def create_server():
         grouped_df = _limit_dataframe_rows(grouped_df, MAX_ROWS_DEFAULT)
         return grouped_df.to_dict()
 
-    @mcp.tool()
+    @mcp.tool
     async def gsea_pipe(
+        ctx: Context,
         csv_id: str,
         hit_col: str = "hit",
         corr_col: str = "corr",
@@ -676,6 +1208,11 @@ def create_server():
         shows a consistent pattern of upregulation or downregulation between two conditions
         (e.g., healthy vs. diseased, treated vs. untreated). GSEA helps identify pathways
         that are significantly enriched in the data.
+
+        Note for LLM agents:
+            - This tool returns only the top results (high/low NES) for brevity.
+            - To explore more rows, use `csv_filter`, `csv_select`, `csv_join` or
+              `csv_aggregate` on returned gsea_result_metadata.
 
         Args:
             csv_id (str): ID of a stored CSV entry (required).
@@ -712,33 +1249,12 @@ def create_server():
             threshold (float, optional): Defaults to 0.05.
 
         Returns:
-            A dictionary containing the GSEA top 10 high NES and low NES results, and the full result metadata.
-            Key attributes:
-                * Term: The biological pathway or process being tested for enrichment.
-                * Enrichment Score (ES): A measure of how strongly the genes in this pathway
-                    are enriched in your ranked gene list.
-                    - Higher ES = Stronger enrichment (greater association with your data).
-                * Normalized Enrichment Score (NES): The ES adjusted for differences in gene set size,
-                    making it easier to compare across different gene sets.
-                    - Higher NES = More statistically significant enrichment.
-                * NOM p-val (Nominal p-value): The statistical significance of the enrichment score
-                    before adjusting for multiple comparisons.
-                    - Lower p-value (<0.05) = More significant result.
-                * FDR q-val (False Discovery Rate q-value): Adjusted p-value to control for false positives
-                    when testing multiple pathways.
-                    - Lower FDR (<0.25) = Higher confidence in the result.
-                * FWER p-val (Family-Wise Error Rate p-value): A stricter correction for multiple testing,
-                    reducing the chance of false positives.
-                    - Lower FWER (<0.05) = More reliable result.
-                * Tag %: The percentage of genes in the pathway that appear in the leading edge subset
-                    (most enriched genes).
-                    - Higher % = More genes driving enrichment.
-                * Gene %: The percentage of genes from your ranked list that belong to this pathway.
-                    - Higher % = More overlap with the pathway.
-                * Lead_genes: The key genes contributing to the enrichment signal in the pathway.
+            - top_high_nes: Top 5 high NES results for each database.
+            - top_low_nes: Top 5 low NES results for each database.
+            - gsea_result_metadata: Storage entry for the saved GSEA results CSV.
+            - gsea_plot_metadata: Storage entry for the saved GSEA plot.
         Notes:
             - The `hit_col` must contain actual gene symbols (not booleans).
-            - A high NES and low FDR indicate strong and reliable enrichment.
             - Smaller `min_size` includes more pathways but can reduce reliability.
             - Larger `max_size` can dilute pathway specificity.
             - If `hit_col` contains numeric or non-symbol gene identifiers (e.g., Entrez or Ensembl),
@@ -770,16 +1286,28 @@ def create_server():
 
             # Use the newer rank_gsea which auto-maps IDs and filters by p/q thresholds
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            sorted_results = rank_gsea(
-                dataset=dataset_df,
-                gene_sets=params.gene_sets,
-                hit_col=params.hit_col,
-                corr_col=params.corr_col,
-                min_size=params.min_size,
-                max_size=params.max_size,
-                threshold=params.threshold,
-                timestamp=timestamp,
+
+            # start sending heartbeat
+            print("FastMCP has emit?", hasattr(ctx, "emit"))
+            heartbeat_task = start_keepalive(ctx, 5.0)
+
+            sorted_results = await asyncio.get_running_loop().run_in_executor(
+                CPU_POOL,
+                functools.partial(
+                    rank_gsea,
+                    dataset=dataset_df,
+                    gene_sets=params.gene_sets,
+                    hit_col=params.hit_col,
+                    corr_col=params.corr_col,
+                    min_size=params.min_size,
+                    max_size=params.max_size,
+                    threshold=params.threshold,
+                    timestamp=timestamp,
+                ),
             )
+
+            # cancel heartbeat
+            heartbeat_task.cancel()
 
             if isinstance(sorted_results, dict):
                 # Safety: in case rank_gsea returns a dict unexpectedly
@@ -794,8 +1322,51 @@ def create_server():
                 }
 
             # rank_gsea returns results sorted by NES ascending
-            top_low_nes = sorted_results.head(10)
-            top_high_nes = sorted_results.tail(10)
+            counts_by_database = {}
+            top_high_nes = {}
+            top_low_nes = {}
+            if "Data Base" in sorted_results.columns:
+                databases = sorted_results["Data Base"].unique()
+                for database in databases:
+                    sorted_results_db = sorted_results[
+                        sorted_results["Data Base"] == database
+                    ]
+                    total_ups = int((sorted_results_db["NES"] > 0).sum())
+                    total_downs = int((sorted_results_db["NES"] < 0).sum())
+                    # Clip the leading genes to at most 5
+                    up_genes = sorted_results_db.head(5)
+                    up_genes["Lead_genes"] = up_genes["Lead_genes"].apply(
+                        lambda x: x.split(";")[:10]
+                    )
+                    down_genes = sorted_results_db.tail(5)
+                    down_genes["Lead_genes"] = down_genes["Lead_genes"].apply(
+                        lambda x: x.split(";")[:10]
+                    )
+                    top_low_nes[database] = down_genes.to_dict(orient="records")
+                    top_high_nes[database] = up_genes.to_dict(orient="records")
+                    counts_by_database[database] = {
+                        "up": total_ups,
+                        "down": total_downs,
+                        "total": total_ups + total_downs,
+                    }
+            else:
+                total_ups = int((sorted_results["NES"] > 0).sum())
+                total_downs = int((sorted_results["NES"] < 0).sum())
+                up_genes = sorted_results.head(10)
+                up_genes["Lead_genes"] = up_genes["Lead_genes"].apply(
+                    lambda x: x.split(";")[:10]
+                )
+                down_genes = sorted_results.tail(10)
+                down_genes["Lead_genes"] = down_genes["Lead_genes"].apply(
+                    lambda x: x.split(";")[:10]
+                )
+                top_low_nes = down_genes.to_dict(orient="records")
+                top_high_nes = up_genes.to_dict(orient="records")
+                counts_by_database = {
+                    "up": total_ups,
+                    "down": total_downs,
+                    "total": total_ups + total_downs,
+                }
 
             # Register generated CSV and plot paths produced by rank_gsea
             _ensure_dir("output")
@@ -838,8 +1409,9 @@ def create_server():
             )
 
             return {
-                "top_high_nes": top_high_nes.to_dict(),
-                "top_low_nes": top_low_nes.to_dict(),
+                "counts_by_database": counts_by_database,
+                "top_high_nes": top_high_nes,
+                "top_low_nes": top_low_nes,
                 "gsea_result_metadata": gsea_csv_metadata,
                 "gsea_plot_metadata": gsea_plot_metadata,
             }
@@ -855,8 +1427,9 @@ def create_server():
             }
             return _exception_payload("gsea_pipe", e, context)
 
-    @mcp.tool()
+    @mcp.tool
     async def ora_pipe(
+        ctx: Context,
         csv_id: str,
         gene_col: str = "gene",
         gene_sets: Optional[List[str]] = None,
@@ -867,6 +1440,10 @@ def create_server():
         shows a consistent pattern of upregulation or downregulation between two conditions
         (e.g., healthy vs. diseased, treated vs. untreated). ORA helps identify pathways
         that are significantly enriched in your data.
+
+        Note for LLM agents:
+            - This tool returns only the top results to keep responses concise.
+            - Use `csv_read`/`csv_filter`/`csv_select` to view additional rows on returned ora_result_metadata.
 
         Args:
             csv_id (str): ID of a stored CSV entry (required).
@@ -904,13 +1481,23 @@ def create_server():
                 raise ValueError(f"Column '{gene_col}' not found in CSV")
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            ora_results = nrank_ora(
-                dataset=df_genes,
-                gene_sets=params.gene_sets,
-                gene_col=gene_col,
-                # organism="human",
-                timestamp=timestamp,
+
+            # start sending heartbeat
+            heartbeat_task = start_keepalive(ctx, 5.0)
+
+            ora_results = await asyncio.get_running_loop().run_in_executor(
+                CPU_POOL,
+                functools.partial(
+                    nrank_ora,
+                    dataset=df_genes,
+                    gene_sets=params.gene_sets,
+                    gene_col=gene_col,
+                    timestamp=timestamp,
+                ),
             )
+
+            # cancel heartbeat
+            heartbeat_task.cancel()
 
             if isinstance(ora_results, dict):
                 ora_results = pd.DataFrame(ora_results)
@@ -937,7 +1524,7 @@ def create_server():
 
             logger.info(f"[ora_pipe] Number of matching results: {len(ora_results)}")
             return {
-                "ora_results": ora_results.to_dict(),
+                "ora_results": ora_results.to_dict(orient="records"),
                 "ora_result_metadata": ora_result_metadata,
             }
         except Exception as e:
@@ -980,7 +1567,7 @@ def create_server():
         )
         df = _limit_dataframe_rows(df, MAX_ROWS_DEFAULT)
         logger.info("🛠️[enrich_rumma] Enrichment fetched successfully")
-        return df.to_dict()
+        return df.to_dict(orient="records")
 
     @mcp.tool()
     async def query_string_rumma(
@@ -1011,7 +1598,7 @@ def create_server():
             return {}
         sets_art = gene_sets_paper_query(articles["pmcid"].tolist())
         if not isinstance(sets_art, pd.DataFrame) or sets_art.empty:
-            return articles.to_dict()
+            return articles.to_dict(orient="records")
         sets_art = sets_art.rename(columns={"pmc": "pmcid"})
         merged = articles.merge(sets_art, how="left", on="pmcid")
         # Preserve original order
@@ -1024,7 +1611,7 @@ def create_server():
         )
         merged = _limit_dataframe_rows(merged, MAX_ROWS_DEFAULT)
         logger.info("🛠️[query_string_rumm] Query string fetched successfully")
-        return merged.to_dict()
+        return merged.to_dict(orient="records")
 
     @mcp.tool()
     async def query_table_rumma(term: str) -> Dict[str, Any]:
@@ -1050,7 +1637,7 @@ def create_server():
         df = _truncate_dataframe_columns(df, ["term", "pmcid"], MAX_CELL_CHARS_DEFAULT)
         df = _limit_dataframe_rows(df, MAX_ROWS_DEFAULT)
         logger.info("🛠️[query_table_rumm] Query table fetched successfully")
-        return df.to_dict()
+        return df.to_dict(orient="records")
 
     @mcp.tool()
     async def sets_info_rumm(gene_set_id: str) -> Dict[str, Any]:
@@ -1074,7 +1661,7 @@ def create_server():
         )
         df = _limit_dataframe_rows(df, MAX_ROWS_DEFAULT)
         logger.info("🛠️[sets_info_rumm] Sets info fetched successfully")
-        return df.to_dict()
+        return df.to_dict(orient="records")
 
     @mcp.tool()
     async def literature_trends(
@@ -1579,7 +2166,7 @@ def create_server():
         conditions: List[Dict[str, Any]],
         keep_columns: Optional[List[str]] = None,
         sort_by: Optional[List[str]] = None,
-        drop_duplicates: Optional[bool] = None,
+        distinct: Optional[bool] = None,
         name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -1596,7 +2183,7 @@ def create_server():
             keep_columns (Optional[List[str]]): Optional subset of columns to keep in the output.
             sort_by (Optional[List[str]]): Optional sort keys. Prefix with '-' for descending
                 (e.g., ["-padj", "log2fc"]). Non-existing columns are ignored.
-            drop_duplicates (Optional[bool]): If true, drops duplicate rows after filtering.
+            distinct (Optional[bool]): If true, drops duplicate rows after filtering.
             name (Optional[str]): Logical name for the output CSV; if not provided an auto name is used.
 
         Returns:
@@ -1609,7 +2196,7 @@ def create_server():
                     "conditions": conditions,
                     "keep_columns": keep_columns,
                     "sort_by": sort_by,
-                    "drop_duplicates": drop_duplicates,
+                    "distinct": distinct,
                     "name": name,
                 },
                 CsvFilterInput,
@@ -1650,9 +2237,13 @@ def create_server():
                     vals = val if isinstance(val, list) else [val]
                     mask &= ~series.isin(vals)
                 elif op == "contains":
-                    mask &= series.astype(str).str.contains(str(val), na=False, case=False)
+                    mask &= series.astype(str).str.contains(
+                        str(val), na=False, case=False
+                    )
                 elif op == "not_contains":
-                    mask &= ~series.astype(str).str.contains(str(val), na=False, case=False)
+                    mask &= ~series.astype(str).str.contains(
+                        str(val), na=False, case=False
+                    )
                 elif op == "startswith":
                     mask &= series.astype(str).str.startswith(str(val), na=False)
                 elif op == "endswith":
@@ -1669,7 +2260,7 @@ def create_server():
                 existing = [c for c in params.keep_columns if c in filtered.columns]
                 if existing:
                     filtered = filtered[existing]
-            if params.drop_duplicates:
+            if params.distinct:
                 filtered = filtered.drop_duplicates()
             if params.sort_by:
                 filtered = _apply_sort(filtered, params.sort_by)
@@ -1709,7 +2300,8 @@ def create_server():
         Args:
             csv_id (str): Storage id of the input CSV to project.
             columns (Optional[List[str]]): Ordered list of columns to keep. If omitted, keep all.
-            rename (Optional[Dict[str, str]]): Mapping of old -> new column names to apply.
+            rename (Optional[Dict[str, str]]): Mapping of old -> new column names to apply
+                (**avoid renaming gene column to "symbol"**).
             distinct (Optional[bool]): If true, drops duplicate rows after selection.
             sort_by (Optional[List[str]]): Optional sort keys. Prefix with '-' for descending.
             name (Optional[str]): Logical name for the output CSV; if not provided an auto name is used.
@@ -1741,7 +2333,10 @@ def create_server():
                 existing = [c for c in params.columns if c in out.columns]
                 out = out[existing]
             if params.rename:
-                out = out.rename(columns={k: v for k, v in (params.rename or {}).items() if k in out.columns})
+                mapping = {
+                    k: v for k, v in (params.rename or {}).items() if k in out.columns
+                }
+                out = out.rename(columns=mapping)
             if params.distinct:
                 out = out.drop_duplicates()
             if params.sort_by:
@@ -1768,27 +2363,30 @@ def create_server():
             )
 
     @mcp.tool()
-    async def csv_intersect(
+    async def csv_join(
         left_csv_id: str,
         right_csv_id: str,
         on: str,
-        left_keep: Optional[List[str]] = None,
-        right_keep: Optional[List[str]] = None,
-        distinct: Optional[bool] = None,
+        how: Optional[str] = None,
+        select: Optional[Dict[str, List[str]]] = None,
+        suffixes: Optional[List[str]] = None,
         name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Intersect rows by a key column present in both CSVs. Returns rows with keys in both.
+        Join two CSVs on a key with flexible select/suffix options, returning the merged table.
 
         Args:
-            left_csv_id (str): Storage id of the left CSV.
-            right_csv_id (str): Storage id of the right CSV.
-            on (str): Join key column present in both CSVs (e.g., "symbol").
-            left_keep (Optional[List[str]]): Columns to keep from the left CSV (defaults to all).
-            right_keep (Optional[List[str]]): Columns to keep from the right CSV (defaults to none).
-                The join key is always included from both sides appropriately.
-            distinct (Optional[bool]): If true, drop duplicate rows by the join key after merge.
-            name (Optional[str]): Logical name for the output CSV; if not provided an auto name is used.
+            left_csv_id (str): Storage id of the left CSV (required).
+            right_csv_id (str): Storage id of the right CSV (required).
+            on (str): Join key column present in both CSVs (e.g., "gene").
+            how (Optional[str]): Join type. One of "inner" | "left" | "right" | "outer".
+                Defaults to "inner".
+            select (Optional[Dict[str, List[str]]]): Optional selection mapping to reduce columns.
+                Format: {"left": [cols...], "right": [cols...]}. If omitted, all columns are used.
+                The join key is always included.
+            suffixes (Optional[List[str]]): Suffixes for overlapping column names (length 2), e.g.,
+                ["_left", "_right"]. Defaults to ["_left", "_right"].
+            name (Optional[str]): Logical name for the output CSV; if omitted an auto name is used.
 
         Returns:
             Dict[str, Any]: Preview with keys {"columns", "rows", "total_rows", "storage_entry"}.
@@ -1799,13 +2397,13 @@ def create_server():
                     "left_csv_id": left_csv_id,
                     "right_csv_id": right_csv_id,
                     "on": on,
-                    "left_keep": left_keep,
-                    "right_keep": right_keep,
-                    "distinct": distinct,
+                    "how": how,
+                    "select": select,
+                    "suffixes": suffixes,
                     "name": name,
                 },
-                CsvIntersectInput,
-                "csv_intersect",
+                CsvJoinInput,
+                "csv_join",
             )
 
             left_path = _resolve_path_from_id(params.left_csv_id)
@@ -1818,29 +2416,48 @@ def create_server():
             if params.on not in left_df.columns or params.on not in right_df.columns:
                 raise ValueError(f"Join key '{params.on}' not found in both CSVs")
 
-            # Keep only relevant columns
-            lcols = params.left_keep or list(left_df.columns)
-            rcols = params.right_keep or []
+            # Column selection
+            if params.select and isinstance(params.select, dict):
+                lcols = params.select.get("left") or list(left_df.columns)
+                rcols = params.select.get("right") or list(right_df.columns)
+            else:
+                lcols = list(left_df.columns)
+                rcols = list(right_df.columns)
             lcols = [c for c in lcols if c in left_df.columns]
             rcols = [c for c in rcols if c in right_df.columns and c != params.on]
 
-            left_sel = left_df[[c for c in set([params.on] + lcols) if c in left_df.columns]]
-            right_sel = right_df[[c for c in set([params.on] + rcols) if c in right_df.columns]]
+            left_sel = left_df[
+                [c for c in set([params.on] + lcols) if c in left_df.columns]
+            ]
+            right_sel = right_df[
+                [c for c in set([params.on] + rcols) if c in right_df.columns]
+            ]
 
-            merged = left_sel.merge(right_sel, how="inner", on=params.on, suffixes=("_left", "_right"))
+            how = (params.how or "inner").lower()
+            if how not in {"inner", "left", "right", "outer"}:
+                raise ValueError("how must be one of 'inner'|'left'|'right'|'outer'")
 
-            if params.distinct:
-                merged = merged.drop_duplicates(subset=[params.on])
+            suffixes = (
+                params.suffixes
+                if (params.suffixes and len(params.suffixes) == 2)
+                else ["_left", "_right"]
+            )
+            merged = left_sel.merge(
+                right_sel, how=how, on=params.on, suffixes=tuple(suffixes)
+            )
 
             entry = _save_dataframe_csv(
                 merged,
                 params.name,
-                origin_tool="csv_intersect",
-                tags=["intersect"],
+                origin_tool="csv_join",
+                tags=["join"],
                 metadata={
                     "left_source_id": params.left_csv_id,
                     "right_source_id": params.right_csv_id,
                     "key": params.on,
+                    "how": how,
+                    "select": params.select,
+                    "suffixes": params.suffixes,
                 },
             )
 
@@ -1849,7 +2466,7 @@ def create_server():
             return preview
         except Exception as e:
             return _exception_payload(
-                "csv_intersect",
+                "csv_join",
                 e,
                 {
                     "left_csv_id": left_csv_id,
@@ -1858,19 +2475,104 @@ def create_server():
                 },
             )
 
+    @mcp.tool()
+    async def csv_aggregate(
+        csv_id: str,
+        aggregations: Dict[str, Dict[str, Union[str, List[str]]]],
+        name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Aggregate columns within a CSV to produce new columns (e.g., mean of replicate log2FC/padj).
+
+        Args:
+            csv_id (str): Storage id of the input CSV (required).
+            aggregations (dict): Mapping of output_col -> {"func": "mean|sum|min|max|median|first|last",
+                "cols": [colA, colB, ...]} specifying how to derive each output column.
+                - mean: row-wise numeric mean across columns (NaNs ignored)
+                - sum: row-wise numeric sum
+                - min|max|median: row-wise reducer across columns
+                - first|last: take first/last column values
+            name (Optional[str]): Logical name for the output CSV; auto if omitted.
+
+        Returns:
+            Dict[str, Any]: Preview with keys {"columns", "rows", "total_rows", "storage_entry"}.
+        """
+        try:
+            params = _validate_params(
+                {
+                    "csv_id": csv_id,
+                    "aggregations": aggregations,
+                    "name": name,
+                },
+                CsvAggregateInput,
+                "csv_aggregate",
+            )
+
+            csv_path = _resolve_path_from_id(params.csv_id)
+            if not csv_path:
+                raise ValueError("Provide csv_id")
+            df = pd.read_csv(csv_path)
+
+            for out_col, spec in (params.aggregations or {}).items():
+                func = (spec or {}).get("func", "mean").lower()
+                cols = (spec or {}).get("cols") or []
+                if not cols:
+                    raise ValueError(
+                        f"No columns specified to aggregate for '{out_col}'"
+                    )
+                for c in cols:
+                    if c not in df.columns:
+                        raise ValueError(f"Aggregation source column '{c}' not found")
+                values = pd.concat(
+                    [pd.to_numeric(df[c], errors="coerce") for c in cols], axis=1
+                )
+                if func == "mean":
+                    df[out_col] = values.mean(axis=1, skipna=True)
+                elif func == "sum":
+                    df[out_col] = values.sum(axis=1, skipna=True)
+                elif func == "min":
+                    df[out_col] = values.min(axis=1, skipna=True)
+                elif func == "max":
+                    df[out_col] = values.max(axis=1, skipna=True)
+                elif func == "median":
+                    df[out_col] = values.median(axis=1, skipna=True)
+                elif func == "first":
+                    df[out_col] = values.iloc[:, 0]
+                elif func == "last":
+                    df[out_col] = values.iloc[:, -1]
+                else:
+                    raise ValueError(
+                        f"Unsupported aggregation func '{func}' for '{out_col}'"
+                    )
+
+            entry = _save_dataframe_csv(
+                df,
+                params.name,
+                origin_tool="csv_aggregate",
+                tags=["aggregate"],
+                metadata={
+                    "source_id": params.csv_id,
+                    "aggregations": params.aggregations,
+                },
+            )
+
+            preview = _preview_dataframe(df)
+            preview.update({"storage_entry": entry})
+            return preview
+        except Exception as e:
+            return _exception_payload(
+                "csv_aggregate",
+                e,
+                {
+                    "csv_id": csv_id,
+                },
+            )
+
     return mcp
 
 
 def main():
     """Main function to start the MCP server."""
-    # Verify OpenAI client is initialized
-    if not openai_client:
-        logger.error(
-            "OpenAI API key not found. Please set OPENAI_API_KEY environment variable."
-        )
-        raise ValueError("OpenAI API key is required")
-
-    # Create the MCP server
     server = create_server()
 
     try:

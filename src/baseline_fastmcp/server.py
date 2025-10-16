@@ -17,9 +17,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 import pandas as pd
 import traceback
-from dotenv import load_dotenv
 from fastmcp import FastMCP
-from openai import OpenAI
 from pydantic import ValidationError
 
 from src.discovera_fastmcp.pydantic import (
@@ -30,17 +28,9 @@ from src.discovera_fastmcp.pydantic import (
     CsvIntersectInput,
 )
 
-load_dotenv()
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# OpenAI configuration
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-
-# Initialize OpenAI client
-openai_client = OpenAI()
 
 
 # =========================
@@ -342,7 +332,9 @@ def create_server():
             filtered_cols = [c for c in by_cols if c in df.columns]
             if not filtered_cols:
                 return df
-            asc_filtered = [ascending[i] for i, c in enumerate(by_cols) if c in filtered_cols]
+            asc_filtered = [
+                ascending[i] for i, c in enumerate(by_cols) if c in filtered_cols
+            ]
             return df.sort_values(by=filtered_cols, ascending=asc_filtered)
         except Exception:
             return df
@@ -622,9 +614,13 @@ def create_server():
                     vals = val if isinstance(val, list) else [val]
                     mask &= ~series.isin(vals)
                 elif op == "contains":
-                    mask &= series.astype(str).str.contains(str(val), na=False, case=False)
+                    mask &= series.astype(str).str.contains(
+                        str(val), na=False, case=False
+                    )
                 elif op == "not_contains":
-                    mask &= ~series.astype(str).str.contains(str(val), na=False, case=False)
+                    mask &= ~series.astype(str).str.contains(
+                        str(val), na=False, case=False
+                    )
                 elif op == "startswith":
                     mask &= series.astype(str).str.startswith(str(val), na=False)
                 elif op == "endswith":
@@ -713,7 +709,13 @@ def create_server():
                 existing = [c for c in params.columns if c in out.columns]
                 out = out[existing]
             if params.rename:
-                out = out.rename(columns={k: v for k, v in (params.rename or {}).items() if k in out.columns})
+                out = out.rename(
+                    columns={
+                        k: v
+                        for k, v in (params.rename or {}).items()
+                        if k in out.columns
+                    }
+                )
             if params.distinct:
                 out = out.drop_duplicates()
             if params.sort_by:
@@ -796,10 +798,16 @@ def create_server():
             lcols = [c for c in lcols if c in left_df.columns]
             rcols = [c for c in rcols if c in right_df.columns and c != params.on]
 
-            left_sel = left_df[[c for c in set([params.on] + lcols) if c in left_df.columns]]
-            right_sel = right_df[[c for c in set([params.on] + rcols) if c in right_df.columns]]
+            left_sel = left_df[
+                [c for c in set([params.on] + lcols) if c in left_df.columns]
+            ]
+            right_sel = right_df[
+                [c for c in set([params.on] + rcols) if c in right_df.columns]
+            ]
 
-            merged = left_sel.merge(right_sel, how="inner", on=params.on, suffixes=("_left", "_right"))
+            merged = left_sel.merge(
+                right_sel, how="inner", on=params.on, suffixes=("_left", "_right")
+            )
 
             if params.distinct:
                 merged = merged.drop_duplicates(subset=[params.on])
@@ -835,14 +843,6 @@ def create_server():
 
 def main():
     """Main function to start the MCP server."""
-    # Verify OpenAI client is initialized
-    if not openai_client:
-        logger.error(
-            "OpenAI API key not found. Please set OPENAI_API_KEY environment variable."
-        )
-        raise ValueError("OpenAI API key is required")
-
-    # Create the MCP server
     server = create_server()
 
     try:

@@ -11,7 +11,6 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 # Copy the application source
-COPY src/baseline_fastmcp /app/src/baseline_fastmcp
 COPY src/discovera /app/src/discovera
 COPY src/discovera_fastmcp /app/src/discovera_fastmcp
 
@@ -21,6 +20,6 @@ ENV PYTHONPATH=/app
 EXPOSE 8000
 
 # Run the FastMCP server. Requires OPENAI_API_KEY to be provided at runtime.
-CMD ["python", "-m", "src.baseline_fastmcp.server"]
+CMD ["python", "-m", "src.discovera_fastmcp.server"]
 
 

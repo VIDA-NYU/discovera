@@ -17,3 +17,5 @@ output/
 
 # saved data
 *.png
+*.csv
+*.ipynb
