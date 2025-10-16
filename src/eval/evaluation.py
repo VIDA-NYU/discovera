@@ -1,5 +1,6 @@
 import pandas as pd
 import os
+import json
 import numpy as np
 import torch
 from sentence_transformers import SentenceTransformer, util
@@ -15,6 +16,7 @@ from plotnine import (
     scale_color_manual
 )
 from functools import reduce
+from pathlib import Path
 
 def load_and_merge_reports(
         paths, columns_to_rename=None
@@ -519,3 +521,207 @@ def traditional_similarity_metrics(
     except Exception as e:
         print(f"Error in semantic similarity pipeline: {e}")
         return None, None
+    
+
+def compute_agreement_summary(
+    benchmark_path: str,
+    experiment_id: str,
+    base_dir: str,
+    report_type: str = "llm(gpt-4o)",
+) -> pd.DataFrame:
+    # --- Load benchmark ---
+    bench = pd.read_csv(benchmark_path)
+
+    # --- Clean Task_ID ---
+    bench["Task_ID"] = (
+        bench["ID"]
+        .astype(str)
+        .str.replace('.', '', regex=False)
+        .str.replace(r'0+$', '', regex=True)
+        .str.rstrip('.')
+        .astype(int)
+    )
+
+    # --- Extract Year_Published ---
+    if "Date Published" in bench.columns:
+        bench["Year_Published"] = pd.to_datetime(
+            bench["Date Published"], errors="coerce"
+        ).dt.year
+    else:
+        raise KeyError("'Date Published' column not found in benchmark file.")
+
+    diff_col = "Difficulty: 1 (Easy) - 2 (Med) - 3 (Hard)"
+
+    # --- Build agreement path ---
+    agreement_path = (
+        Path(base_dir)
+        / "experiments"
+        / experiment_id
+        / "analysis"
+        / f"groundtruth_vs_{report_type}"
+        / "agreement_report_level_by_source.csv"
+    )
+
+    # --- Load agreement data ---
+    agreement = pd.read_csv(agreement_path)
+
+    # --- Merge benchmark info ---
+    agreement = agreement.merge(
+        bench[["Task_ID", diff_col, "Year_Published"]],
+        how="left",
+        on="Task_ID"
+    )
+
+    # --- Helper: aggregate by variable ---
+    def aggregate_variable(var_name: str) -> pd.DataFrame:
+        by_source = (
+            agreement.groupby(["Question_Source", var_name], as_index=False)["Agreement_Percentage"]
+            .mean()
+            .rename(columns={"Agreement_Percentage": "Mean_Agreement_Percentage", var_name: "Value"})
+        )
+        by_source["Variable"] = var_name
+
+        overall = (
+            agreement.groupby([var_name], as_index=False)["Agreement_Percentage"]
+            .mean()
+            .rename(columns={"Agreement_Percentage": "Mean_Agreement_Percentage", var_name: "Value"})
+        )
+        overall["Variable"] = var_name
+        overall["Question_Source"] = "Overall"
+
+        return pd.concat([by_source, overall], ignore_index=True)
+
+    df_diff = aggregate_variable(diff_col)
+    df_year = aggregate_variable("Year_Published")
+
+    # --- Combine ---
+    result = (
+        pd.concat([df_diff, df_year], ignore_index=True)
+        .loc[:, ["Question_Source", "Variable", "Value", "Mean_Agreement_Percentage"]]
+        .sort_values(["Question_Source", "Variable", "Value"])
+        .reset_index(drop=True)
+    )
+
+    # --- Add report type and sort ---
+    result["Report_Type"] = report_type
+    result = result[
+        ["Report_Type", "Question_Source", "Variable", "Value", "Mean_Agreement_Percentage"]
+    ].sort_values(
+        by=["Report_Type", "Variable", "Question_Source", "Value"]
+    ).reset_index(drop=True)
+
+    return result
+
+
+def compute_all_reports(
+    benchmark_path: str,
+    experiment_id: str,
+    report_types: list[str],
+    base_dir: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    combined = []
+    overall_stats = []
+
+    for rtype in report_types:
+        print(f"Processing report_type: {rtype} ...")
+        df = compute_agreement_summary(
+            benchmark_path=benchmark_path,
+            experiment_id=experiment_id,
+            report_type=rtype,
+            base_dir=base_dir
+        )
+        combined.append(df)
+
+        # --- Load raw agreement ---
+        agreement_path = (
+            Path(base_dir)
+            / "experiments"
+            / experiment_id
+            / "analysis"
+            / f"groundtruth_vs_{rtype}"
+            / "agreement_report_level_by_source.csv"
+        )
+
+        if not agreement_path.exists():
+            print(f" Missing file for {rtype}, skipping overall stats.")
+            continue
+
+        agreement = pd.read_csv(agreement_path)
+
+        # --- Overall mean agreement per Question_Source ---
+        overall = (
+            agreement.groupby("Question_Source", as_index=False)["Agreement_Percentage"]
+            .mean()
+            .rename(columns={"Agreement_Percentage": "Overall_Mean_Agreement"})
+        )
+        overall["Report_Type"] = rtype
+
+        # --- Compute % I don't know from JSONs ---
+        idk_df = compute_percent_idontknow(experiment_id, rtype, base_dir)
+        overall = overall.merge(idk_df, on=["Report_Type", "Question_Source"], how="left")
+        overall_stats.append(overall)
+
+    combined_df = pd.concat(combined, ignore_index=True)
+    overall_df = pd.concat(overall_stats, ignore_index=True)
+
+    # --- Melt overall to long format ---
+    overall_df = overall_df.melt(
+        id_vars=["Question_Source", "Report_Type"],
+        value_vars=["Overall_Mean_Agreement", "Percent_IDontKnow"],
+        var_name="Variable",
+        value_name="Value"
+    ).sort_values(
+        by=["Report_Type", "Variable", "Question_Source"]
+    ).reset_index(drop=True)
+
+    # --- Save both dataframes ---
+    analysis_path = Path(base_dir) / "experiments" / experiment_id / "analysis"
+    analysis_path.mkdir(parents=True, exist_ok=True)
+
+    combined_file = analysis_path / "summary_by_variable.csv"
+    overall_file = analysis_path / "overall_summary.csv"
+
+    combined_df.to_csv(combined_file, index=False)
+    overall_df.to_csv(overall_file, index=False)
+
+    print(f"Saved variable-level summary to {combined_file}")
+    print(f"Saved overall summary to {overall_file}")
+
+
+def compute_percent_idontknow(experiment_id: str, report_type: str, base_dir) -> pd.DataFrame:
+    """
+    Compute % of "I don't know" predictions (prediction=='E') for a given report type.
+    Returns a DataFrame with columns: Report_Type, Question_Source, Percent_IDontKnow
+    """
+    folder = Path(base_dir) / "experiments" / experiment_id / "answers" / f"groundtruth_vs_{report_type}"
+
+    records = []
+    for filename in os.listdir(folder):
+        if filename.endswith('.json'):
+            filepath = folder / filename
+            with open(filepath, 'r') as f:
+                try:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        data['filename'] = filename
+                        records.append(data)
+                    elif isinstance(data, list):
+                        for item in data:
+                            if isinstance(item, dict):
+                                item['filename'] = filename
+                                records.append(item)
+                except json.JSONDecodeError as e:
+                    print(f"⚠️ Could not read {filename}: {e}")
+
+    df = pd.DataFrame(records)
+
+    if df.empty or 'prediction' not in df.columns or 'question_source' not in df.columns:
+        return pd.DataFrame(columns=["Report_Type", "Question_Source", "Percent_IDontKnow"])
+
+    results = []
+    for source in df['question_source'].unique():
+        subset = df[df['question_source'] == source]
+        percent = (subset['prediction'] == 'E').mean() * 100
+        results.append({"Report_Type": report_type, "Question_Source": source, "Percent_IDontKnow": percent})
+
+    return pd.DataFrame(results)
