@@ -870,11 +870,11 @@ def create_server():
                         # Clip the leading genes to at most 5
                         up_genes = gsea_df_db.head(5)
                         up_genes["Lead_genes"] = up_genes["Lead_genes"].apply(
-                            lambda x: x.split(",")[:10]
+                            lambda x: x.split(",")[:20]
                         )
                         down_genes = gsea_df_db.tail(5)
                         down_genes["Lead_genes"] = down_genes["Lead_genes"].apply(
-                            lambda x: x.split(",")[:10]
+                            lambda x: x.split(",")[:20]
                         )
                         top_low_nes[database] = down_genes.to_json(orient="records")
                         top_high_nes[database] = up_genes.to_json(orient="records")
@@ -888,11 +888,11 @@ def create_server():
                     total_downs = int((gsea_df["NES"] < 0).sum())
                     up_genes = gsea_df.head(10)
                     up_genes["Lead_genes"] = up_genes["Lead_genes"].apply(
-                        lambda x: x.split(",")[:10]
+                        lambda x: x.split(",")[:20]
                     )
                     down_genes = gsea_df.tail(10)
                     down_genes["Lead_genes"] = down_genes["Lead_genes"].apply(
-                        lambda x: x.split(",")[:10]
+                        lambda x: x.split(",")[:20]
                     )
                     top_low_nes = down_genes.to_json(orient="records")
                     top_high_nes = up_genes.to_json(orient="records")
@@ -1762,7 +1762,7 @@ def create_server():
         df = _limit_dataframe_rows(df, MAX_ROWS_DEFAULT)
 
         logger.info("🛠️[gene_info] Gene info fetched successfully")
-        return df.to_dict(orient="records")
+        return df.to_dict()
 
     # =========================
     # Local storage tools
