@@ -71,125 +71,6 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("discovera_fastmcp")
 
-server_instructions = """
-You are an expert in biomedical research, focusing on mutation effects, treatment responses,
-pathway enrichments, and mechanistic biology.
-
-# STYLE & GOALS
-- Voice: results-style, concise, causal, definitive (e.g., "led to", "resulted in", "confirmed").
-- Focus: mutation/treatment context, tissue/cell line, assay(s); cross-omics overlap when applicable.
-- Elevate pathways and genes that are **supported by the intersection** of modalities or contrasts.
-- Mark strong single-modality signals as **secondary/discordant** with lower confidence.
-- Always include inline PMIDs and a references list; end with Next Steps & Clarification.
-
-# CRITICAL GUARDRAILS
-- **Try to use the biomedical knowledge you have to answer the user's question.**
-- **One tool per assistant turn.** Wait for the previous tool's result before deciding the next call.
-- **Minimal toolset**: choose only what's necessary for the user's task; do not run the full suite by default.
-- **Literature is mandatory** before finalizing: call one of `query_string_rumma`,
-  `query_table_rumma`, or `literature_trends`, to fetch PMIDs that support the
-  main claims.
-- If input URLs are provided, use `csv_record` and **copy the URL exactly as given** (no edits).
-- If GSEA pre-rank size is too small (<25), fall back to ORA and declare reduced confidence.
-
-
-# CSV-FIRST WORKFLOW (MANDATORY BEFORE ENRICHMENT)
-- Always inspect and shape CSVs before deciding the enrichment pipeline.
-- Use these tools in separate turns as needed (one tool per turn):
-  - `csv_select` to keep/rename columns (e.g., `symbol`, `log2fc`, `padj`).
-  - `csv_filter` to subset rows (e.g., padj ≤ 0.05, log2fc < 0).
-  - `csv_join` to join datasets on a key; then `csv_aggregate` to compute means of replicates
-    (e.g., average `log2FoldChange` and `padj` across shRNA1/2) before enrichment.
-- After shaping, preview the result and summarize key stats (row count, columns,
-  top examples) in natural language. Only then select the pipeline.
-
-
-# PIPELINED CALLS (one tool per turn; skip any that are unnecessary)
-
-0) **Data Intake**
-   - If URL is provided: `csv_record(url)` -> file_id.
-1) **Check Data**
-   - `csv_read(file_id, n_rows)` -> table preview.
-1b) **CSV Shaping (required before enrichment)**
-   - Narrow columns with `csv_select` (keep `symbol`, stats; rename if needed).
-   - Filter significance/direction with `csv_filter` (e.g., padj/log2fc).
-   - Join multi-omics or multi-contrast lists with `csv_join` on key, then aggregate replicates with `csv_aggregate`.
-2) **Enrichment (decision order with fallbacks)**
-   - If a ranking metric exists (e.g., `log2FoldChange`, `stat`, or similar): call `gsea_pipe`.
-   - Else, if raw counts exist: call `run_deseq2_gsea_pipe`.
-     Infer `sample_groups` from raw count column headers as {{group: [sample_ids...]}} and pass it.
-   - Else: call `ora_pipe` on the overlap/intersected set.
-   - If the chosen method returns no valid results, call the next option in the order above until results are found.
-   - GSEA/ORA responses include only top results for brevity. Full results are saved and
-     returned as metadata (storage id). Use `csv_read` / `csv_filter` / `csv_select` on that id to explore more rows.
-3) **Leading Edge & Mechanism (optional)**
-   - Extract top contributing genes per enriched term (internal).
-   - If mechanism/detail requested or implied, call:
-     - `gene_info` on leading genes;
-     - `query_genes` for interactions/mechanisms;
-     - `sets_info_rumm` for term definitions/context.
-4) **Literature (choose one before final)**
-   - `query_string_rumma` or `query_table_rumma` using top terms + salient entities from Methods/GT.
-   - `literature_trends` to gather PMIDs/time context.
-   - If the first choice return no results, call the second choice.
-5) **Output (final)** in the required format below, plus Next Steps & Clarification.
-
-
-# REQUIRED OUTPUT FORMAT
-
-## Introduction / Context
-- Mutation/treatment; tissue/cell line; assay(s) and comparison; dataset/paper reference.
-- One or two sentences framing the biological question.
-- **Add an analysis of the input data, if there is any definitive informations related to the question, state them.**
-
-## Pathway Enrichments (grouped by themes; cross-omics first when applicable)
-Provide a compact table:
-
-| Theme | Pathway | Direction | NES/OR | FDR | Leading Edge (≤8) |
-|------|---------|-----------|--------|-----|--------------------|
-
-- Report **top up- and down-regulated** terms by theme (e.g., canonical Wnt, AP patterning, neuron projection).
-- Include ALL leading pathways from the enrichment results.
-- For GSEA outputs, you MUST create a separate table for each gene set library
-  (e.g., KEGG, Reactome, GO) using `per_database` top_up and top_down.
-  Include all up- and down-regulated pathways without truncation.
-- Include exact stats (NES for GSEA or OR for ORA) and FDR.
-- After the table, add a 2–4 sentence interpretation linking to context. Include the direction of enrichment.
-
-## Key Genes / Proteins (leading edge)
-Provide a compact table:
-
-| Gene | Direction | Role/Function | Pathway(s) |
-|------|-----------|---------------|------------|
-
-- Show all up- and down-regulated genes in the leading edge, highlight the ones
-  that are most important to the user's question.
-
-## Mechanistic Interpretation
-- 3–6 sentences connecting mutation/treatment → pathway shifts → molecular mechanisms
-  (e.g., phosphorylation/degradation, chromatin derepression, signaling activation/inhibition),
-  with inline PMIDs.
-
-## Comparisons
-- Tissue-specific vs overlapping results across contexts/contrasts; call out
-  **discordant single-modality** findings as lower confidence.
-
-## Implications
-- Relevance for therapy, resistance, or disease progression; be definitive but evidence-bounded.
-
-## Next Steps & Clarification
-- 2–4 concrete follow-ups (e.g., tighten overlap rule, validate module X in
-  independent cohort, drug–gene mapping for top pathway).
-- Ask up to 2 crisp questions if any context is missing or ambiguous
-  (libraries, thresholds, promoter-only mapping, etc.).
-
-# FINALIZATION RULES
-- If GSEA was infeasible (small list), state that ORA was used and mark confidence accordingly.
-- Explicitly report the **overlap/intersection rule** used (for multi-omics or multi-contrast tasks).
-- If prominent signals do **not** survive overlap (e.g., RNA-only keratinization),
-  include them in Comparisons as **discordant**.
-"""
-
 
 # =========================
 # Local storage helpers
@@ -870,11 +751,11 @@ def create_server():
                         # Clip the leading genes to at most 5
                         up_genes = gsea_df_db.head(5)
                         up_genes["Lead_genes"] = up_genes["Lead_genes"].apply(
-                            lambda x: x.split(",")[:20]
+                            lambda x: x.split(",")
                         )
                         down_genes = gsea_df_db.tail(5)
                         down_genes["Lead_genes"] = down_genes["Lead_genes"].apply(
-                            lambda x: x.split(",")[:20]
+                            lambda x: x.split(",")
                         )
                         top_low_nes[database] = down_genes.to_json(orient="records")
                         top_high_nes[database] = up_genes.to_json(orient="records")
@@ -888,11 +769,11 @@ def create_server():
                     total_downs = int((gsea_df["NES"] < 0).sum())
                     up_genes = gsea_df.head(10)
                     up_genes["Lead_genes"] = up_genes["Lead_genes"].apply(
-                        lambda x: x.split(",")[:20]
+                        lambda x: x.split(",")
                     )
                     down_genes = gsea_df.tail(10)
                     down_genes["Lead_genes"] = down_genes["Lead_genes"].apply(
-                        lambda x: x.split(",")[:20]
+                        lambda x: x.split(",")
                     )
                     top_low_nes = down_genes.to_json(orient="records")
                     top_high_nes = up_genes.to_json(orient="records")
@@ -1109,9 +990,13 @@ def create_server():
                 final_df, ["text"], MAX_CELL_CHARS_DEFAULT
             )
             final_df = _limit_dataframe_rows(final_df, MAX_ROWS_DEFAULT)
-            return final_df.to_dict()
+            output_dict = final_df.to_dict(orient="records")
+            if output_dict and len(output_dict) > 0:
+                return {"results": output_dict}
+            else:
+                return {"results": []}
         else:
-            return {}
+            return {"results": []}
 
     @mcp.tool
     async def count_edges(
@@ -1164,7 +1049,11 @@ def create_server():
         # Group by the specified columns and count the occurrences
         grouped_df = edges_df.groupby(group_columns).size().reset_index(name="count")
         grouped_df = _limit_dataframe_rows(grouped_df, MAX_ROWS_DEFAULT)
-        return grouped_df.to_dict()
+        output_dict = grouped_df.to_dict(orient="records")
+        if output_dict and len(output_dict) > 0:
+            return {"results": output_dict}
+        else:
+            return {"results": []}
 
     @mcp.tool
     async def gsea_pipe(
@@ -1315,11 +1204,11 @@ def create_server():
                     # Clip the leading genes to at most 5
                     up_genes = sorted_results_db.head(5)
                     up_genes["Lead_genes"] = up_genes["Lead_genes"].apply(
-                        lambda x: x.split(",")[:10]
+                        lambda x: x.split(",")
                     )
                     down_genes = sorted_results_db.tail(5)
                     down_genes["Lead_genes"] = down_genes["Lead_genes"].apply(
-                        lambda x: x.split(",")[:10]
+                        lambda x: x.split(",")
                     )
                     top_low_nes[database] = down_genes.to_dict(orient="records")
                     top_high_nes[database] = up_genes.to_dict(orient="records")
@@ -1333,11 +1222,11 @@ def create_server():
                 total_downs = int((sorted_results["NES"] < 0).sum())
                 up_genes = sorted_results.head(10)
                 up_genes["Lead_genes"] = up_genes["Lead_genes"].apply(
-                    lambda x: x.split(",")[:10]
+                    lambda x: x.split(",")
                 )
                 down_genes = sorted_results.tail(10)
                 down_genes["Lead_genes"] = down_genes["Lead_genes"].apply(
-                    lambda x: x.split(",")[:10]
+                    lambda x: x.split(",")
                 )
                 top_low_nes = down_genes.to_dict(orient="records")
                 top_high_nes = up_genes.to_dict(orient="records")
@@ -1551,7 +1440,8 @@ def create_server():
         )
         df = _limit_dataframe_rows(df, MAX_ROWS_DEFAULT)
         logger.info("🛠️[enrich_rumma] Enrichment fetched successfully")
-        return df.to_dict(orient="records")
+        records = df.to_dict(orient="records") if isinstance(df, pd.DataFrame) else []
+        return {"results": records}
 
     @mcp.tool()
     async def query_string_rumma(
@@ -1579,10 +1469,10 @@ def create_server():
         pmcs_with_prefix = ["PMC" + pmc for pmc in pmc_ids]
         articles = fetch_pmc_info(pmcs_with_prefix)
         if articles.empty or "pmcid" not in articles.columns:
-            return {}
+            return {"results": []}
         sets_art = gene_sets_paper_query(articles["pmcid"].tolist())
         if not isinstance(sets_art, pd.DataFrame) or sets_art.empty:
-            return articles.to_dict(orient="records")
+            return {"results": articles.to_dict(orient="records")}
         sets_art = sets_art.rename(columns={"pmc": "pmcid"})
         merged = articles.merge(sets_art, how="left", on="pmcid")
         # Preserve original order
@@ -1595,7 +1485,7 @@ def create_server():
         )
         merged = _limit_dataframe_rows(merged, MAX_ROWS_DEFAULT)
         logger.info("🛠️[query_string_rumm] Query string fetched successfully")
-        return merged.to_dict(orient="records")
+        return {"results": merged.to_dict(orient="records")}
 
     @mcp.tool()
     async def query_table_rumma(term: str) -> Dict[str, Any]:
@@ -1615,13 +1505,13 @@ def create_server():
 
         df = table_search_query(params.term)
         if df.empty or "term" not in df.columns:
-            return {}
+            return {"results": []}
         df["pmcid"] = df["term"].str.extract(r"(PMC\d+)")
         df["term"] = df["term"].str.replace(r"PMC\d+-?", "", regex=True)
         df = _truncate_dataframe_columns(df, ["term", "pmcid"], MAX_CELL_CHARS_DEFAULT)
         df = _limit_dataframe_rows(df, MAX_ROWS_DEFAULT)
         logger.info("🛠️[query_table_rumm] Query table fetched successfully")
-        return df.to_dict(orient="records")
+        return {"results": df.to_dict(orient="records")}
 
     @mcp.tool()
     async def sets_info_rumm(gene_set_id: str) -> Dict[str, Any]:
@@ -1645,7 +1535,7 @@ def create_server():
         )
         df = _limit_dataframe_rows(df, MAX_ROWS_DEFAULT)
         logger.info("🛠️[sets_info_rumm] Sets info fetched successfully")
-        return df.to_dict(orient="records")
+        return {"results": df.to_dict(orient="records")}
 
     @mcp.tool()
     async def literature_trends(
@@ -1738,7 +1628,11 @@ def create_server():
         )
         df = _limit_dataframe_rows(df, MAX_ROWS_DEFAULT)
         logger.info("🛠️[prioritize_genes] Prioritized genes fetched successfully")
-        return df.to_dict()
+        output_dict = df.to_dict(orient="records")
+        if output_dict and len(output_dict) > 0:
+            return {"results": output_dict}
+        else:
+            return {"results": []}
 
     @mcp.tool()
     async def gene_info(gene_list: List[str]) -> Dict[str, Any]:
@@ -1762,7 +1656,12 @@ def create_server():
         df = _limit_dataframe_rows(df, MAX_ROWS_DEFAULT)
 
         logger.info("🛠️[gene_info] Gene info fetched successfully")
-        return df.to_dict()
+        output_dict = df.to_dict(orient="records")
+
+        if output_dict and len(output_dict) > 0:
+            return {"results": output_dict}
+        else:
+            return {"results": []}
 
     # =========================
     # Local storage tools
