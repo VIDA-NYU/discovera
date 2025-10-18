@@ -71,11 +71,21 @@ def plot_gsea_results(
     """
     Plot GSEA results with NES values and significance stars for multiple databases.
     """
+    # Guard against empty or None inputs
+    if df is None or (hasattr(df, "empty") and df.empty):
+        print("No GSEA results to plot. Skipping plot generation.")
+        return None
+
     df = df.copy()
     df["stars"] = df[pval_col].apply(pval_to_stars)
 
     databases = df[db_col].unique()
     n_db = len(databases)
+
+    # Guard against zero databases after filtering
+    if n_db == 0:
+        print("No databases present in GSEA results. Skipping plot generation.")
+        return None
 
     plt.ioff()
     fig, axes = plt.subplots(n_db, 1, figsize=(8, 4 * n_db), sharex=True)
@@ -481,7 +491,8 @@ def rank_gsea(
     corr_col,
     min_size=5,
     max_size=200,
-    threshold=0.05,
+    p_value_threshold=0.05,
+    fdr_threshold=0.05,
     timestamp=None,
 ):
     if timestamp is None:
@@ -543,6 +554,10 @@ def rank_gsea(
                     "Lead_genes",
                 ]
             ]
+            if p_value_threshold:
+                res_df = res_df[res_df["NOS p-val"].lt(p_value_threshold)]
+            if fdr_threshold:
+                res_df = res_df[res_df["FDR q-val"].lt(fdr_threshold)]
             if results_df is None:
                 results_df = res_df
             else:
@@ -552,13 +567,44 @@ def rank_gsea(
         print(f"GSEA prerank failed: {e}")
         return pd.DataFrame()
 
+    # If no results passed the filters, handle gracefully
+    if results_df is None or results_df.empty:
+        print(
+            f"No GSEA results matched the thresholds (p-val < {p_value_threshold}, FDR < {fdr_threshold})."
+        )
+        # Save an empty results file with expected columns for consistency
+        empty_cols = [
+            "Data Base",
+            "Pathway",
+            "NES",
+            "Size",
+            "ES",
+            "NOS p-val",
+            "FDR q-val",
+            "Lead_genes",
+        ]
+        empty_df = pd.DataFrame(columns=empty_cols)
+        save_with_timestamp(empty_df, "gsea_results", timestamp)
+        # Skip plotting and return empty frame
+        return empty_df
+
     save_with_timestamp(results_df, "gsea_results", timestamp)
-    print(f"Number of matching results with p-val < {threshold}: {len(results_df)}")
+    print(
+        f"Number of matching results with p-val < {p_value_threshold}, fdr < {fdr_threshold}: {len(results_df)}"
+    )
 
     sorted_results = results_df.sort_values(by="NES", ascending=False)
+    if sorted_results.empty:
+        print("Sorted GSEA results are empty. Skipping plot generation.")
+        return results_df
+
     top_low_nes = sorted_results.head(10)
     top_high_nes = sorted_results.tail(10)
     top_combined = pd.concat([top_high_nes, top_low_nes]).drop_duplicates()
+
+    if top_combined.empty:
+        print("Top combined GSEA results are empty. Skipping plot generation.")
+        return results_df
 
     plot_gsea_results(top_combined, timestamp)
     return results_df
