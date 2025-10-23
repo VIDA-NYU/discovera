@@ -186,9 +186,7 @@ def _slugify(value: str) -> str:
 def _register_file(
     path: str,
     category: str,
-    origin_tool: str | None = None,
-    tags: list[str] | None = None,
-    metadata: dict | None = None,
+    to_s3: bool = False,
 ) -> dict:
     abs_path = str(Path(path).resolve())
     p = Path(abs_path)
@@ -209,12 +207,13 @@ def _register_file(
     }
 
     # Optionally upload to S3 and attach presigned URL
-    try:
-        s3_info = _s3_upload_and_presign(abs_path)
-        if s3_info:
-            entry["s3_presigned_url"] = s3_info.get("s3_presigned_url")
-    except Exception:
-        pass
+    if to_s3:
+        try:
+            s3_info = _s3_upload_and_presign(abs_path)
+            if s3_info:
+                entry["s3_presigned_url"] = s3_info.get("s3_presigned_url")
+        except Exception:
+            pass
 
     entries = _load_storage_index()
     entries = [
@@ -224,7 +223,10 @@ def _register_file(
     ]
     entries.append(entry)
     _save_storage_index(entries)
-    return {k: entry.get(k) for k in ("id", "name", "path", "s3_presigned_url")}
+    if to_s3:
+        return {k: entry.get(k) for k in ("id", "name", "path", "s3_presigned_url")}
+    else:
+        return {k: entry.get(k) for k in ("id", "name", "path")}
 
 
 def _filter_entries(
@@ -294,32 +296,24 @@ def _resolve_path_from_id(file_id: str | None) -> str | None:
 # =========================
 def _save_dataframe_csv(
     df: pd.DataFrame,
-    name: str | None,
-    origin_tool: str,
-    tags: list[str] | None = None,
-    metadata: dict | None = None,
+    filename: str,
 ) -> dict:
     """Save DataFrame to output/user_csvs and register.
 
     Returns the storage entry dict.
     """
     try:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         base_dir = os.path.join("output", "user_csvs")
         _ensure_dir(base_dir)
-        base_name = name or f"{origin_tool}_{timestamp}"
-        fname = f"{_slugify(base_name)}.csv"
-        abs_path = os.path.join(base_dir, fname)
+        abs_path = os.path.join(base_dir, filename)
         df.to_csv(abs_path, index=False)
         entry = _register_file(
             abs_path,
             category="generated",
-            origin_tool=origin_tool,
-            tags=["csv", "generated"] + (tags or []),
-            metadata=metadata or {},
+            to_s3=False,
         )
         # Return public/minimal info
-        return {k: entry.get(k) for k in ("id", "name", "path", "s3_presigned_url")}
+        return {k: entry.get(k) for k in ("id", "name", "path")}
     except Exception as e:
         raise e
 
@@ -692,16 +686,7 @@ def create_server():
             # Save DESeq2 results and register
             _save_dataframe_csv(
                 de_results,
-                name="deseq2_results",
-                origin_tool="run_deseq2_gsea_pipe",
-                tags=["rna-seq", "deseq2", "results"],
-                metadata={
-                    "raw_counts_csv_id": params.raw_counts_csv_id,
-                    "sample_groups": params.sample_groups,
-                    "gene_column": params.gene_column,
-                    "sample_column": sample_col_name,
-                    "group_column": group_col_name,
-                },
+                filename=f"deseq2_results_{params.raw_counts_csv_id}.csv"
             )
             # Run GSEA directly using helper to avoid calling MCP tool from inside server
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -709,7 +694,7 @@ def create_server():
             # start sending heartbeat
             heartbeat_task = start_keepalive(ctx, 5.0)
 
-            gsea_df = await asyncio.get_running_loop().run_in_executor(
+            sorted_results = await asyncio.get_running_loop().run_in_executor(
                 CPU_POOL,
                 functools.partial(
                     rank_gsea,
@@ -728,121 +713,119 @@ def create_server():
             # cancel heartbeat
             heartbeat_task.cancel()
 
-            if isinstance(gsea_df, dict):
-                gsea_df = pd.DataFrame(gsea_df)
+            if isinstance(sorted_results, dict):
+                # Safety: in case rank_gsea returns a dict unexpectedly
+                sorted_results = pd.DataFrame(sorted_results)
 
-            if gsea_df is None or len(gsea_df) == 0:
-                gsea_payload = {
+            if sorted_results is None or len(sorted_results) == 0:
+                logger.info("[gsea_pipe] No GSEA results after filtering")
+                return {
                     "top_high_nes": {},
                     "top_low_nes": {},
                     "gsea_result_metadata": {},
-                    "gsea_plot_metadata": {},
                 }
-            else:
-                counts_by_database = {}
-                top_high_nes = {}
-                top_low_nes = {}
-                if "Data Base" in gsea_df.columns:
-                    databases = gsea_df["Data Base"].unique()
-                    for database in databases:
-                        gsea_df_db = gsea_df[gsea_df["Data Base"] == database]
-                        total_ups = int((gsea_df_db["NES"] > 0).sum())
-                        total_downs = int((gsea_df_db["NES"] < 0).sum())
-                        # Clip the leading genes to at most 5
-                        up_genes = gsea_df_db.head(5)
-                        up_genes["Lead_genes"] = up_genes["Lead_genes"].apply(
-                            lambda x: x.split(",")
-                        )
-                        down_genes = gsea_df_db.tail(5)
-                        down_genes["Lead_genes"] = down_genes["Lead_genes"].apply(
-                            lambda x: x.split(",")
-                        )
-                        top_low_nes[database] = down_genes.to_json(orient="records")
-                        top_high_nes[database] = up_genes.to_json(orient="records")
-                        counts_by_database[database] = {
-                            "up": total_ups,
-                            "down": total_downs,
-                            "total": total_ups + total_downs,
-                        }
-                else:
-                    total_ups = int((gsea_df["NES"] > 0).sum())
-                    total_downs = int((gsea_df["NES"] < 0).sum())
-                    up_genes = gsea_df.head(10)
+
+            # rank_gsea returns results sorted by NES ascending
+            counts_by_database = {}
+            top_high_nes = {}
+            top_low_nes = {}
+            if "Data Base" in sorted_results.columns:
+                databases = sorted_results["Data Base"].unique()
+                for database in databases:
+                    sorted_results_db = sorted_results[
+                        sorted_results["Data Base"] == database
+                    ]
+                    total_ups = int((sorted_results_db["NES"] > 0).sum())
+                    total_downs = int((sorted_results_db["NES"] < 0).sum())
+                    # Clip the leading genes to at most 5
+                    up_genes = sorted_results_db.head(5)
                     up_genes["Lead_genes"] = up_genes["Lead_genes"].apply(
                         lambda x: x.split(",")
                     )
-                    down_genes = gsea_df.tail(10)
+                    down_genes = sorted_results_db.tail(5)
                     down_genes["Lead_genes"] = down_genes["Lead_genes"].apply(
                         lambda x: x.split(",")
                     )
-                    top_low_nes = down_genes.to_json(orient="records")
-                    top_high_nes = up_genes.to_json(orient="records")
-                    counts_by_database = {
+                    top_low_nes[database] = down_genes.to_dict(orient="records")
+                    top_high_nes[database] = up_genes.to_dict(orient="records")
+                    counts_by_database[database] = {
                         "up": total_ups,
                         "down": total_downs,
                         "total": total_ups + total_downs,
                     }
-
-                # Try to register outputs if created by rank_gsea
-                _ensure_dir("output")
-                csv_path = os.path.join("output", f"gsea_results_{timestamp}.csv")
-                plot_path = os.path.join("output", f"gsea_results_{timestamp}.png")
-
-                gsea_csv_metadata = None
-                gsea_plot_metadata = None
-                try:
-                    if os.path.exists(csv_path):
-                        gsea_csv_metadata = _register_file(
-                            csv_path,
-                            category="generated",
-                            origin_tool="run_deseq2_gsea_pipe",
-                            tags=["gsea", "results"],
-                            metadata={
-                                "hit_col": "GeneID",
-                                "corr_col": "log2FoldChange",
-                                "p_value_threshold": params.p_value_threshold,
-                                "fdr_threshold": params.fdr_threshold,
-                            },
-                        )
-                except Exception:
-                    pass
-                try:
-                    if os.path.exists(plot_path):
-                        gsea_plot_metadata = _register_file(
-                            plot_path,
-                            category="generated",
-                            origin_tool="run_deseq2_gsea_pipe",
-                            tags=["gsea", "plot"],
-                            metadata={"timestamp": timestamp},
-                        )
-                except Exception:
-                    pass
-
-                gsea_payload = {
-                    "counts_by_database": counts_by_database,
-                    "top_high_nes": top_high_nes,
-                    "top_low_nes": top_low_nes,
-                    "gsea_result_metadata": gsea_csv_metadata,
-                    "gsea_plot_metadata": gsea_plot_metadata,
+            else:
+                total_ups = int((sorted_results["NES"] > 0).sum())
+                total_downs = int((sorted_results["NES"] < 0).sum())
+                up_genes = sorted_results.head(10)
+                up_genes["Lead_genes"] = up_genes["Lead_genes"].apply(
+                    lambda x: x.split(",")
+                )
+                down_genes = sorted_results.tail(10)
+                down_genes["Lead_genes"] = down_genes["Lead_genes"].apply(
+                    lambda x: x.split(",")
+                )
+                top_low_nes = down_genes.to_dict(orient="records")
+                top_high_nes = up_genes.to_dict(orient="records")
+                counts_by_database = {
+                    "up": total_ups,
+                    "down": total_downs,
+                    "total": total_ups + total_downs,
                 }
 
-            logger.critical(
-                f"GSEA top_high_nes: {top_high_nes}\ntop_low_nes: {top_low_nes}\n"
+            # Register generated CSV and plot paths produced by rank_gsea
+            _ensure_dir("output")
+            csv_path = os.path.join("output", f"gsea_results_{timestamp}.csv")
+            plot_path = os.path.join("output", f"gsea_results_{timestamp}.png")
+
+            gsea_csv_metadata = None
+            gsea_plot_metadata = None
+
+            try:
+                if os.path.exists(csv_path):
+                    gsea_csv_metadata = _register_file(
+                        csv_path,
+                        category="generated",
+                        to_s3=True
+                    )
+            except Exception:
+                pass
+
+            try:
+                if os.path.exists(plot_path):
+                    gsea_plot_metadata = _register_file(
+                        plot_path,
+                        category="generated",
+                        to_s3=True
+                    )
+            except Exception:
+                pass
+
+            logger.info(
+                (
+                    f"[gsea_pipe] Results filtered by p<{params.p_value_threshold}, "
+                    f"FDR<{params.fdr_threshold}: {len(sorted_results)}"
+                )
             )
-            # Return combined
-            # return {
-            #     "deseq2_preview": _preview_dataframe(de_results),
-            #     "deseq2_result_metadata": de_entry,
-            #     "gsea": gsea_payload,
-            # }
-            return gsea_payload
+
+            return {
+                "counts_by_database": counts_by_database,
+                "top_high_nes": top_high_nes,
+                "top_low_nes": top_low_nes,
+                "gsea_result_metadata": gsea_csv_metadata,
+                "gsea_plot_metadata": gsea_plot_metadata,
+            }
         except Exception as e:
             context = {
-                "raw_counts_csv_id": raw_counts_csv_id,
-                "sample_groups": sample_groups,
-                "gene_column": gene_column,
+                "dataset": params.csv_id,
+                "hit_col": params.hit_col,
+                "corr_col": params.corr_col,
+                "gene_sets": params.gene_sets,
+                "min_size": params.min_size,
+                "max_size": params.max_size,
+                "p_value_threshold": params.p_value_threshold,
+                "fdr_threshold": params.fdr_threshold,
             }
-            return _exception_payload("run_deseq2_gsea_pipe", e, context)
+            return _exception_payload("gsea_pipe", e, context)
 
     @mcp.tool
     async def query_genes(
@@ -1249,14 +1232,7 @@ def create_server():
                     gsea_csv_metadata = _register_file(
                         csv_path,
                         category="generated",
-                        origin_tool="gsea_pipe",
-                        tags=["gsea", "results"],
-                        metadata={
-                            "p_value_threshold": params.p_value_threshold,
-                            "fdr_threshold": params.fdr_threshold,
-                            "hit_col": params.hit_col,
-                            "corr_col": params.corr_col,
-                        },
+                        to_s3=True
                     )
             except Exception:
                 pass
@@ -1266,9 +1242,7 @@ def create_server():
                     gsea_plot_metadata = _register_file(
                         plot_path,
                         category="generated",
-                        origin_tool="gsea_pipe",
-                        tags=["gsea", "plot"],
-                        metadata={"timestamp": timestamp},
+                        to_s3=True
                     )
             except Exception:
                 pass
@@ -1388,9 +1362,7 @@ def create_server():
                     ora_result_metadata = _register_file(
                         csv_path,
                         category="generated",
-                        origin_tool="ora_pipe",
-                        tags=["ora", "results"],
-                        metadata={"timestamp": timestamp, "gene_col": gene_col},
+                        to_s3=True
                     )
             except Exception:
                 pass
@@ -1584,17 +1556,15 @@ def create_server():
         # Register the saved plot if present
         try:
             if save_path and os.path.exists(save_path):
-                _register_file(
+                literature_plot_metadata = _register_file(
                     save_path,
                     category="generated",
-                    origin_tool="literature_trends",
-                    tags=["literature", "plot"],
-                    metadata={"term": params.term},
+                    to_s3=True
                 )
         except Exception:
             pass
         logger.info("🛠️[literature_trends] Literature trends fetched successfully")
-        return {"year_to_ids": compressed, "image_path": save_path}
+        return {"year_to_ids": compressed, "literature_plot_metadata": literature_plot_metadata}
 
     @mcp.tool()
     async def prioritize_genes(
@@ -1919,9 +1889,7 @@ def create_server():
             entry = _register_file(
                 abs_path,
                 category="user_input",
-                origin_tool="csv_record",
-                tags=tags,
-                metadata=metadata,
+                to_s3=False
             )
             logger.info("🛠️[csv_record] CSV file registered successfully: %s", abs_path)
             return entry
@@ -2087,10 +2055,7 @@ def create_server():
 
             entry = _save_dataframe_csv(
                 filtered,
-                params.name,
-                origin_tool="csv_filter",
-                tags=["filter"],
-                metadata={"source_id": params.csv_id},
+                filename=f"csv_filter_{params.csv_id}.csv"
             )
 
             preview = _preview_dataframe(filtered)
@@ -2164,10 +2129,7 @@ def create_server():
 
             entry = _save_dataframe_csv(
                 out,
-                params.name,
-                origin_tool="csv_select",
-                tags=["select"],
-                metadata={"source_id": params.csv_id},
+                filename=f"csv_select_{params.csv_id}.csv"
             )
 
             preview = _preview_dataframe(out)
@@ -2268,17 +2230,7 @@ def create_server():
 
             entry = _save_dataframe_csv(
                 merged,
-                params.name,
-                origin_tool="csv_join",
-                tags=["join"],
-                metadata={
-                    "left_source_id": params.left_csv_id,
-                    "right_source_id": params.right_csv_id,
-                    "key": params.on,
-                    "how": how,
-                    "select": params.select,
-                    "suffixes": params.suffixes,
-                },
+                filename=f"csv_join_{params.left_csv_id}_{params.right_csv_id}_{params.on}.csv"
             )
 
             preview = _preview_dataframe(merged)
@@ -2367,13 +2319,7 @@ def create_server():
 
             entry = _save_dataframe_csv(
                 df,
-                params.name,
-                origin_tool="csv_aggregate",
-                tags=["aggregate"],
-                metadata={
-                    "source_id": params.csv_id,
-                    "aggregations": params.aggregations,
-                },
+                filename=f"csv_aggregate_{params.csv_id}_{'_'.join(params.aggregations.keys())}.csv"
             )
 
             preview = _preview_dataframe(df)
