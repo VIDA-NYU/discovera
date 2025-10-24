@@ -554,10 +554,9 @@ def rank_gsea(
                     "Lead_genes",
                 ]
             ]
-            if p_value_threshold:
-                res_df = res_df[res_df["NOS p-val"].lt(p_value_threshold)]
-            if fdr_threshold:
-                res_df = res_df[res_df["FDR q-val"].lt(fdr_threshold)]
+            # Filter either p-value or fdr is significant
+            if p_value_threshold and fdr_threshold:
+                res_df = res_df[res_df["NOS p-val"].lt(p_value_threshold) | res_df["FDR q-val"].lt(fdr_threshold)]
             if results_df is None:
                 results_df = res_df
             else:
