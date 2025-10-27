@@ -129,6 +129,12 @@ for enrichment analysis. Defaults to
 - KEGG_2021_Human: Kyoto Encyclopedia of Genes and Genomes (metabolic and signaling pathways).
 """,
     )
+    p_value_threshold: Optional[float] = Field(
+        default=0.2,
+        description="""
+The p-value threshold for the ORA results.
+""",
+    )
 
 
 class EnrichRummaInput(BaseModel):

@@ -217,7 +217,7 @@ def map_to_symbol(df, gene_col, cache_file=None):
 
     def chunks(lst, n):
         for i in range(0, len(lst), n):
-            yield lst[i : i + n]
+            yield lst[i: i + n]
 
     def fetch_chunk(id_chunk):
         results = []
@@ -718,7 +718,7 @@ def classic_gsea(
     return results_df
 
 
-def nrank_ora(dataset, gene_sets, gene_col, timestamp=None):
+def nrank_ora(dataset, gene_sets, gene_col, p_value_threshold=0.2, timestamp=None):
     """
     Perform Enrichr enrichment analysis on a gene list.
     Automatically maps Ensembl/Entrez/RefSeq/UniProt IDs to symbols.
@@ -758,7 +758,7 @@ def nrank_ora(dataset, gene_sets, gene_col, timestamp=None):
         print("Enrichr returned no results.")
         return results
 
-    results = results[results["Adjusted P-value"] < 0.05]
+    results = results[results["Adjusted P-value"] < p_value_threshold]
     results = results.sort_values(by="Combined Score", ascending=False)
     save_with_timestamp(results, "ora_results", timestamp)
 

@@ -216,13 +216,19 @@ def _register_file(
             pass
 
     entries = _load_storage_index()
-    entries = [
-        {k: e.get(k) for k in ("id", "path", "name", "category", "s3_presigned_url")}
-        for e in entries
-        if e.get("path") != abs_path
-    ]
-    entries.append(entry)
-    _save_storage_index(entries)
+    # Preserve existing entries keyed by id to avoid invalidating previously returned ids,
+    # even when the same path is re-registered (e.g., repeated writes to a deterministic filename).
+    entries_by_id: dict[str, dict] = {}
+    for e in entries:
+        eid = e.get("id")
+        if not eid:
+            continue
+        entries_by_id[eid] = {
+            k: e.get(k) for k in ("id", "path", "name", "category", "s3_presigned_url")
+        }
+    # Add/overwrite current entry by its unique id
+    entries_by_id[entry_id] = entry
+    _save_storage_index(list(entries_by_id.values()))
     if to_s3:
         return {k: entry.get(k) for k in ("id", "name", "path", "s3_presigned_url")}
     else:
@@ -287,6 +293,19 @@ def _resolve_path_from_id(file_id: str | None) -> str | None:
             if e.get("id") == file_id:
                 p = e.get("path")
                 return str(Path(p).resolve()) if p else None
+        # Fallback: if exact id not found, attempt to match by stable hash suffix
+        # This helps when a file is re-registered at the same path, generating a new timestamp-based id
+        # but preserving the path-hash suffix (last 8 hex chars after the underscore).
+        try:
+            suffix = str(file_id).split("_")[-1]
+            candidates = [
+                e for e in entries if str(e.get("id", "")).split("_")[-1] == suffix
+            ]
+            if len(candidates) == 1:
+                p = candidates[0].get("path")
+                return str(Path(p).resolve()) if p else None
+        except Exception:
+            pass
         raise FileNotFoundError(f"No entry with id {file_id}")
     return None
 
@@ -582,7 +601,9 @@ def create_server():
                 Gene set libraries for GSEA. Defaults to:
                 ["KEGG_2016", "GO_Biological_Process_2023", "Reactome_Pathways_2024", "MSigDB_Hallmark_2020"].
             p_value_threshold (float, optional): Filter GSEA results by p-value. Defaults to 0.05.
+                If there are not enough results, rerun with a higher threshold.
             fdr_threshold (float, optional): Filter GSEA results by FDR. Defaults to 0.05.
+                If there are not enough results, rerun with a higher threshold.
 
         Returns:
             Dict[str, Any] with keys including:
@@ -685,8 +706,7 @@ def create_server():
 
             # Save DESeq2 results and register
             _save_dataframe_csv(
-                de_results,
-                filename=f"deseq2_results_{params.raw_counts_csv_id}.csv"
+                de_results, filename=f"deseq2_results_{params.raw_counts_csv_id}.csv"
             )
             # Run GSEA directly using helper to avoid calling MCP tool from inside server
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -783,9 +803,7 @@ def create_server():
             try:
                 if os.path.exists(csv_path):
                     gsea_csv_metadata = _register_file(
-                        csv_path,
-                        category="generated",
-                        to_s3=True
+                        csv_path, category="generated", to_s3=True
                     )
             except Exception:
                 pass
@@ -793,9 +811,7 @@ def create_server():
             try:
                 if os.path.exists(plot_path):
                     gsea_plot_metadata = _register_file(
-                        plot_path,
-                        category="generated",
-                        to_s3=True
+                        plot_path, category="generated", to_s3=True
                     )
             except Exception:
                 pass
@@ -1095,7 +1111,9 @@ def create_server():
                 - Default is `200` (gene sets with more than 200 genes are excluded to maintain specificity).
 
             p_value_threshold (float, optional): Defaults to 0.05.
+                If there are not enough results, rerun with a higher threshold.
             fdr_threshold (float, optional): Defaults to 0.05.
+                If there are not enough results, rerun with a higher threshold.
 
         Returns:
             - top_high_nes: Top 5 high NES results for each database.
@@ -1230,9 +1248,7 @@ def create_server():
             try:
                 if os.path.exists(csv_path):
                     gsea_csv_metadata = _register_file(
-                        csv_path,
-                        category="generated",
-                        to_s3=True
+                        csv_path, category="generated", to_s3=True
                     )
             except Exception:
                 pass
@@ -1240,9 +1256,7 @@ def create_server():
             try:
                 if os.path.exists(plot_path):
                     gsea_plot_metadata = _register_file(
-                        plot_path,
-                        category="generated",
-                        to_s3=True
+                        plot_path, category="generated", to_s3=True
                     )
             except Exception:
                 pass
@@ -1280,6 +1294,7 @@ def create_server():
         csv_id: str,
         gene_col: str = "gene",
         gene_sets: Optional[List[str]] = None,
+        p_value_threshold: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Performs Over Representation Analysis (ORA), a computational method
@@ -1299,7 +1314,8 @@ def create_server():
                 which will be auto-mapped to symbols. Defaults to "gene".
             gene_sets (Optional[List[str]]): Predefined gene set collections used for enrichment.
                 Defaults to ["MSigDB_Hallmark_2020", "KEGG_2021_Human"].
-
+            p_value_threshold (Optional[float]): Defaults to 0.2.
+                Rerun with a higher threshold if there are not enough results.
         Returns:
             pd.DataFrame: A DataFrame containing the ORA results, including:
                 - Term: The biological pathway or process being tested for enrichment.
@@ -1313,7 +1329,12 @@ def create_server():
         """
         # Validate/construct params
         params = _validate_params(
-            {"csv_id": csv_id, "gene_col": gene_col, "gene_sets": gene_sets},
+            {
+                "csv_id": csv_id,
+                "gene_col": gene_col,
+                "gene_sets": gene_sets,
+                "p_value_threshold": p_value_threshold,
+            },
             OraPipeInput,
             "ora_pipe",
         )
@@ -1339,6 +1360,7 @@ def create_server():
                     dataset=df_genes,
                     gene_sets=params.gene_sets,
                     gene_col=gene_col,
+                    p_value_threshold=params.p_value_threshold,
                     timestamp=timestamp,
                 ),
             )
@@ -1360,9 +1382,7 @@ def create_server():
             try:
                 if os.path.exists(csv_path):
                     ora_result_metadata = _register_file(
-                        csv_path,
-                        category="generated",
-                        to_s3=True
+                        csv_path, category="generated", to_s3=True
                     )
             except Exception:
                 pass
@@ -1557,14 +1577,15 @@ def create_server():
         try:
             if save_path and os.path.exists(save_path):
                 literature_plot_metadata = _register_file(
-                    save_path,
-                    category="generated",
-                    to_s3=True
+                    save_path, category="generated", to_s3=True
                 )
         except Exception:
             pass
         logger.info("🛠️[literature_trends] Literature trends fetched successfully")
-        return {"year_to_ids": compressed, "literature_plot_metadata": literature_plot_metadata}
+        return {
+            "year_to_ids": compressed,
+            "literature_plot_metadata": literature_plot_metadata,
+        }
 
     @mcp.tool()
     async def prioritize_genes(
@@ -1886,11 +1907,7 @@ def create_server():
             if source == "csv_path":
                 metadata["csv_path"] = str(Path(params.csv_path).resolve())
 
-            entry = _register_file(
-                abs_path,
-                category="user_input",
-                to_s3=False
-            )
+            entry = _register_file(abs_path, category="user_input", to_s3=False)
             logger.info("🛠️[csv_record] CSV file registered successfully: %s", abs_path)
             return entry
         except Exception as e:
@@ -2053,10 +2070,33 @@ def create_server():
             if params.sort_by:
                 filtered = _apply_sort(filtered, params.sort_by)
 
-            entry = _save_dataframe_csv(
-                filtered,
-                filename=f"csv_filter_{params.csv_id}.csv"
+            # Deterministic hash of filter parameters so multiple distinct filters on the
+            # same source CSV produce distinct, discoverable filenames without metadata.
+            cond_payload = [
+                {
+                    "column": c.column,
+                    "op": c.op,
+                    "value": c.value,
+                }
+                for c in (params.conditions or [])
+            ]
+            flavor_str = json.dumps(
+                {
+                    "conditions": cond_payload,
+                    "keep": params.keep_columns,
+                    "sort": params.sort_by,
+                    "distinct": bool(params.distinct),
+                },
+                sort_keys=True,
             )
+            flavor_hash = hashlib.md5(flavor_str.encode("utf-8")).hexdigest()[:10]
+            out_name = (
+                f"csv_filter_{params.csv_id}_{flavor_hash}.csv"
+                if not params.name
+                else f"{_slugify(params.name)}_{flavor_hash}.csv"
+            )
+
+            entry = _save_dataframe_csv(filtered, filename=out_name)
 
             preview = _preview_dataframe(filtered)
             preview.update({"storage_entry": entry})
@@ -2127,10 +2167,24 @@ def create_server():
             if params.sort_by:
                 out = _apply_sort(out, params.sort_by)
 
-            entry = _save_dataframe_csv(
-                out,
-                filename=f"csv_select_{params.csv_id}.csv"
+            # Deterministic hash of selection parameters (columns/rename/distinct/sort)
+            select_str = json.dumps(
+                {
+                    "columns": params.columns,
+                    "rename": params.rename,
+                    "distinct": bool(params.distinct),
+                    "sort": params.sort_by,
+                },
+                sort_keys=True,
             )
+            select_hash = hashlib.md5(select_str.encode("utf-8")).hexdigest()[:10]
+            out_name = (
+                f"csv_select_{params.csv_id}_{select_hash}.csv"
+                if not params.name
+                else f"{_slugify(params.name)}_{select_hash}.csv"
+            )
+
+            entry = _save_dataframe_csv(out, filename=out_name)
 
             preview = _preview_dataframe(out)
             preview.update({"storage_entry": entry})
@@ -2228,10 +2282,24 @@ def create_server():
                 right_sel, how=how, on=params.on, suffixes=tuple(suffixes)
             )
 
-            entry = _save_dataframe_csv(
-                merged,
-                filename=f"csv_join_{params.left_csv_id}_{params.right_csv_id}_{params.on}.csv"
+            # Deterministic hash of join parameters (on/how/select/suffixes)
+            join_str = json.dumps(
+                {
+                    "on": params.on,
+                    "how": how,
+                    "select": params.select,
+                    "suffixes": suffixes,
+                },
+                sort_keys=True,
             )
+            join_hash = hashlib.md5(join_str.encode("utf-8")).hexdigest()[:10]
+            out_name = (
+                f"csv_join_{params.left_csv_id}_{params.right_csv_id}_{join_hash}.csv"
+                if not params.name
+                else f"{_slugify(params.name)}_{join_hash}.csv"
+            )
+
+            entry = _save_dataframe_csv(merged, filename=out_name)
 
             preview = _preview_dataframe(merged)
             preview.update({"storage_entry": entry})
@@ -2317,10 +2385,18 @@ def create_server():
                         f"Unsupported aggregation func '{func}' for '{out_col}'"
                     )
 
-            entry = _save_dataframe_csv(
-                df,
-                filename=f"csv_aggregate_{params.csv_id}_{'_'.join(params.aggregations.keys())}.csv"
+            # Deterministic hash of aggregation specs so different specs produce distinct files
+            agg_str = json.dumps(
+                {k: v for k, v in (params.aggregations or {}).items()}, sort_keys=True
             )
+            agg_hash = hashlib.md5(agg_str.encode("utf-8")).hexdigest()[:10]
+            out_name = (
+                f"csv_aggregate_{params.csv_id}_{agg_hash}.csv"
+                if not params.name
+                else f"{_slugify(params.name)}_{agg_hash}.csv"
+            )
+
+            entry = _save_dataframe_csv(df, filename=out_name)
 
             preview = _preview_dataframe(df)
             preview.update({"storage_entry": entry})
