@@ -5,8 +5,9 @@ import zipfile
 import pandas as pd
 import time
 import tomllib 
-from gradio_client import Client, handle_file
 import argparse
+
+from gradio_client import Client, handle_file
 
 
 def load_biomni_credentials(conf_path=os.path.expanduser("../../.beaker.conf")):
@@ -43,7 +44,7 @@ def biomni_login(client):
         password=PASSWORD,
         api_name="/handle_login"
     )
-    print(f"🔐 Logged in as: {USERNAME}")
+    print(f"Logged in as: {USERNAME}")
     return login_result[5]   # token
 
 
@@ -172,9 +173,26 @@ if __name__ == "__main__":
     parser.add_argument("--output", required=True)
     parser.add_argument("--model", default="OpenAI O4-Mini")
     parser.add_argument("--experiment", default=f"biomni_run_{time.strftime('%Y%m%d_%H%M%S')}")
+    parser.add_argument(
+        "--task_ids",
+        type=str,
+        default=None,
+        help="Comma-separated list of task IDs to process. Example: --task_ids 1,5,22"
+    )
     args = parser.parse_args()
 
     df = pd.read_csv(args.benchmark)
+    # Normalize task ID column to string for matching
+    df["ID_str"] = df["ID"].apply(
+        lambda x: str(int(x)) if isinstance(x, float) and x.is_integer() else str(x)
+    )
+
+    # If user passed task IDs, filter for those only
+    if args.task_ids:
+        selected_ids = [x.strip() for x in args.task_ids.split(",")]
+        print(f"Running only on task IDs: {selected_ids}")
+        df = df[df["ID_str"].isin(selected_ids)]
+        
     output_df = process_biomni_dataframe(
         df=df,
         tasks_folder=args.tasks,
