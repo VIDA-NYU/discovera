@@ -139,7 +139,7 @@ def get_valid_hgnc_symbols():
     """
     Download HGNC reference table and cache it for validation.
     """
-    url = "https://storage.googleapis.com/public-download-files/hgnc/tsv/tsv/hgnc_complete_set.txt"
+    url = "https://storage.googleapis.com/public-download-files/hgnc/archive/archive/monthly/tsv/hgnc_complete_set_2025-11-07.txt"
     hgnc_df = pd.read_csv(url, sep="\t", low_memory=False)
     return set(hgnc_df["symbol"].dropna().str.upper())
 
@@ -322,10 +322,24 @@ def prepare_gene_symbols(df, gene_col):
         )
     else:
         df = map_to_symbol(df, gene_col)
-        print(f"Mapping performed: {len(df)} IDs mapped to human symbols.")
+        # Report mapping quality
+        num_total = len(df)
+        num_mapped_non_null = df["symbol"].notna().sum()
+        print(
+            f"Mapping performed: {num_mapped_non_null}/{num_total} IDs mapped to human symbols."
+        )
 
     # Filter against HGNC
-    df = df[df["symbol"].isin(valid_symbols)].copy()
+    print(f"[prepare_gene_symbols] df head: {df.head(10)}")
+    df_valid = df[df["symbol"].isin(valid_symbols)].copy()
+    # Fallback: if HGNC validation removes everything but we do have mapped symbols,
+    # keep non-null mapped symbols rather than returning empty.
+    if df_valid.empty and df["symbol"].notna().any():
+        warnings.warn(
+            "No matches found in HGNC after mapping; using non-null mapped symbols as fallback."
+        )
+        df_valid = df[df["symbol"].notna()].copy()
+    df = df_valid
     df = df.drop(columns=[gene_col], errors="ignore")
     df[gene_col] = df["symbol"]
     return df
