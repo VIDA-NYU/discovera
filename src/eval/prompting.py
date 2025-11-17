@@ -1,9 +1,10 @@
 import time
 import os
-import toml 
 import json
 import re
 import csv
+import pandas as pd
+import glob
 
 from typing import List, Callable, Optional, Union, Dict, Any, Tuple
 from tqdm import tqdm
@@ -11,7 +12,7 @@ from collections import Counter
 from statistics import mode, StatisticsError
 
 
-def load_openai_key(beaker_conf_path="../../.beaker.conf"):
+def load_openai_key():
     """
     Load OpenAI API key from a Beaker configuration file.
 
@@ -21,12 +22,11 @@ def load_openai_key(beaker_conf_path="../../.beaker.conf"):
     Returns:
         str: OpenAI API key.
     """
-    config = toml.load(beaker_conf_path)
-    print("Beaker config loaded successfully.")
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+    if not openai_api_key:
+        raise ValueError("OPENAI_API_KEY environment variable is not set")
+    # print("Loaded API key (first 10 chars):", openai_api_key[:10] + "...")
 
-    openai_api_key = config['providers']['openai']['api_key']
-    #print("Loaded API key (first 10 chars):", openai_api_key[:10] + "...")
-    
     return openai_api_key
 
 
@@ -34,7 +34,7 @@ def load_reports(
     csv_path: str,
     report_column: str = "Ground Truth",
     task_id: str = "ID",
-    prompt: Optional[str] = "Prompt"
+    prompt: Optional[str] = "Prompt",
 ) -> List[Tuple[str, str, Optional[str], str]]:
     """
     Load structured reports from a CSV file.
@@ -65,7 +65,7 @@ def load_reports(
     reports = []
     source = report_column
 
-    with open(csv_path, newline='', encoding='utf-8') as f:
+    with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         # Normalize headers for safe lookup
         reader.fieldnames = [h.strip() for h in reader.fieldnames]
@@ -99,17 +99,16 @@ class OpenAILLM:
     def run(self, prompt: str, json_output: bool = True):
         """
         Sends a prompt to the model and returns the response.
-        
+
         Parameters:
         - prompt: str, the instruction or task for the model.
         - json_output: bool, if True, parse output as JSON, else return raw text.
-        
+
         Returns:
         - dict or str: Parsed JSON if json_output=True, else raw text.
         """
         resp = self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}]
+            model=self.model, messages=[{"role": "user", "content": prompt}]
         )
 
         content = resp.choices[0].message.content.strip()
@@ -117,9 +116,11 @@ class OpenAILLM:
             try:
                 return json.loads(content)
             except Exception:
-                content_clean = re.sub(r"^```json\s*|\s*```$", "", content, flags=re.DOTALL).strip()
+                content_clean = re.sub(
+                    r"^```json\s*|\s*```$", "", content, flags=re.DOTALL
+                ).strip()
                 return json.loads(content_clean)
-            
+
 
 def get_llm(backend: str, model: str = None, **kwargs):
     """
@@ -135,6 +136,7 @@ def get_llm(backend: str, model: str = None, **kwargs):
     """
     if backend == "openai":
         from openai import OpenAI
+
         api_key = kwargs.get("api_key")
         print(f"[INFO] Initializing LLM: backend='{backend}', model='{model}'")
 
@@ -152,28 +154,206 @@ def get_llm(backend: str, model: str = None, **kwargs):
         raise ValueError(f"Unknown LLM backend: {backend}")
 
 
+def load_benchmark_breakdown(csv_path: str) -> List[Dict[str, Any]]:
+    """
+    Load benchmark breakdown CSV with merged Task ID and Context columns.
+
+    Parameters
+    ----------
+    csv_path : str
+        Path to the benchmark breakdown CSV file.
+
+    Returns
+    -------
+    List[Dict[str, Any]]
+        A list of dictionaries, each containing:
+        - "task_id": str - Task ID
+        - "context": str - Context text
+        - "keypoint_num": int - Keypoint number
+        - "ground_truth_keypoint": str - Ground truth keypoint text
+        - "fine_grained_prompt": str - Fine-grained prompt/question
+    """
+    tasks = []
+    current_task_id = None
+    current_context = None
+
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        # Normalize headers
+        reader.fieldnames = [h.strip() if h else h for h in reader.fieldnames]
+
+        for row in reader:
+            # Handle merged cells: if Task ID is present, update current task
+            task_id = row.get("Task ID", "").strip()
+            if task_id:
+                current_task_id = task_id
+
+            # Handle merged cells: if Context is present, update current context
+            context = row.get("Context", "").strip()
+            if context:
+                current_context = context
+
+            # Skip rows without required fields
+            if not current_task_id or not current_context:
+                continue
+
+            keypoint_num = row.get("Keypoints", "").strip()
+            ground_truth = row.get("Ground Truth Keypoint", "").strip()
+            prompt = row.get("Fine-grained Prompt", "").strip()
+
+            # Skip rows without keypoint data
+            if not keypoint_num or not ground_truth or not prompt:
+                continue
+
+            try:
+                keypoint_num = int(keypoint_num)
+            except ValueError:
+                continue
+
+            tasks.append(
+                {
+                    "task_id": current_task_id,
+                    "context": current_context,
+                    "keypoint_num": keypoint_num,
+                    "ground_truth_keypoint": ground_truth,
+                    "fine_grained_prompt": prompt,
+                }
+            )
+
+    return tasks
+
+
+def batched_keypoints_template(
+    task_id: str, context: str, keypoints: List[Dict[str, Any]]
+) -> str:
+    """
+    Template for generating MCQs from batched keypoints.
+
+    Parameters
+    ----------
+    task_id : str
+        Task ID for this batch.
+    context : str
+        The context/background information for the task.
+    keypoints : List[Dict[str, Any]]
+        List of keypoint dictionaries, each containing:
+        - "keypoint_num": int
+        - "keypoint": str
+        - "fine_grained_prompt": str
+
+    Returns
+    -------
+    str
+        Formatted prompt for LLM.
+    """
+    # Format keypoints for display
+    keypoints_text = "\n".join(
+        [f"Keypoint {kp['keypoint_num']}: {kp['keypoint']}" for kp in keypoints]
+    )
+
+    return f"""
+You are generating evaluation questions directly and ONLY from the keypoints listed below.
+
+DO NOT use Discovera reports, Biomni reports, or any other text.
+
+The correct answer MUST be deducible solely from the content of the keypoint.
+
+--- BEGIN CONTEXT ---
+{context}
+--- END CONTEXT ---
+
+--- BEGIN KEYPOINTS ---
+{keypoints_text}
+--- END KEYPOINTS ---
+
+For each keypoint:
+
+1. The question must test the truth of the keypoint exactly as written.
+   a. Do NOT alter, reinterpret, invert, generalize, or narrow the meaning.
+   b. Do NOT ask questions that the answering model could answer using its own
+      report instead of the keypoint.
+
+2. Avoid any question format that could be answered by reasoning from general
+   biology knowledge alone. The model must be forced to rely on the keypoint
+   itself.
+
+3. The question must not require external domain knowledge (e.g., what a gene
+   normally does). Everything the model needs must be explicitly stated in the
+   keypoint.
+
+4. Forbidden question types:
+   - "Which of the following is NOT…"
+   - "All of the following EXCEPT…"
+   - Questions about numerical values, quantities, dates, sample sizes.
+   - Questions requiring knowledge beyond the keypoint text.
+
+5. Allowed style:
+   - Direct restatement (best for accuracy)
+   - Simple conceptual paraphrases that retain identical meaning
+   - "According to the description…" → forces use of the keypoint
+   - "In this analysis…" → avoids contamination from the model's own report
+
+6. Each question must have EXACTLY four answer choices, formatted as:
+   A. <choice text>
+   B. …
+   C. …
+   D. …
+
+7. Correct answers must be randomly distributed among A–D. Avoid positional bias.
+
+8. You may include "None of the above" sparingly (max 10% of questions) —
+   and it may be correct or incorrect.
+
+9. Output format (strict):
+   A JSON list of objects:
+   [
+     {{
+       "task_id": "{task_id}",
+       "question_id": "<keypoint_num>",
+       "question_source": "groundtruth",
+       "question": "<string>",
+       "choices": [
+         "A. <string>",
+         "B. <string>",
+         "C. <string>",
+         "D. <string>"
+       ],
+       "answer": "<A/B/C/D>"
+     }}
+   ]
+
+Generate exactly {len(keypoints)} questions, one for each keypoint listed above.
+""".strip()
+
 
 def multiple_questions_template(report_text: str, prompt: str, n: int) -> str:
     return f"""
-        You are a biomedical researcher. Your task is to generate UP TO {n} multiple-choice questions strictly based on the ANALYSIS provided below.
+        You are a biomedical researcher. Your task is to generate UP TO {n}
+        multiple-choice questions strictly based on the ANALYSIS provided
+        below.
         The ANALYSIS answers the following guiding question: {prompt}.
         --- BEGIN ANALYSIS ---
         {report_text}
         --- END ANALYSIS ---
 
         Instructions:
-        1. First, identify the most important findings, mechanisms, or insights in the analysis that directly contribute to answering the main question above.
+        1. First, identify the most important findings, mechanisms, or
+           insights in the analysis that directly contribute to answering
+           the main question above.
         2. Formulate questions only from these central points. Exclude background details or minor observations.
         3. Avoid questions that rely on numerical values, dates, or excessively specific facts.
         4. Do NOT use knowledge outside of the analysis.
-        5. Ensure all questions are conceptual, inferential, or analytical, emphasizing reasoning, implications, and relationships.
+        5. Ensure all questions are conceptual, inferential, or analytical,
+           emphasizing reasoning, implications, and relationships.
         6. Each question must have exactly four answer choices, formatted as follows:
             A. <choice text>
             B. <choice text>
             C. <choice text>
             D. <choice text>
         7. The correct answer should be randomly distributed among A, B, C, or D — avoid always placing it as "A".
-        8. Occasionally, you may include "None of the above" as one of the four choices if appropriate — but do not overuse it. It can be either correct or incorrect.
+        8. Occasionally, you may include "None of the above" as one of the
+           four choices if appropriate — but do not overuse it. It can be
+           either correct or incorrect.
         9. If fewer than {n} high-quality questions can be generated, provide only those that meet the criteria.
         10. Ensure the output is valid JSON.
                     
@@ -199,31 +379,35 @@ def multiple_questions_template(report_text: str, prompt: str, n: int) -> str:
         """.strip()
 
 
-def answer_prompt_template(
-    question: str, choices: List[str], report: str
-) -> str:
+def answer_prompt_template(question: str, choices: List[str], report: str) -> str:
     if report:
         prompt = f"""
         You are a biomedical domain expert. Use ONLY the information provided in the ANALYSIS below to answer the question.
+        You are strictly prohibited from using world knowledge, prior training knowledge, or domain expertise.
+        You must behave as if this report is the only biological text you have ever seen.
+        Do not make assumptions.
+        
         --- BEGIN ANALYSIS ---
         {report}
         --- END ANALYSIS ---
 
-        Question:
+        QUESTION:
         {question}
 
-        Choices:
+        CHOICES:
         {choices[0]}
         {choices[1]}
         {choices[2]}
         {choices[3]}
 
 
-        Instructions:
+        INSTRUCTIONS:
         - Choose the correct answer ONLY if it is explicitly supported or can be directly inferred from the ANALYSIS.
-        - If the ANALYSIS does not contain sufficient evidence for any of the choices, respond with `"answer": "E"` (meaning I don't know).
         - Do NOT use outside knowledge, prior experience, or speculation.
-        - If the evidence is incomplete or ambiguous, choose `"E"` rather than guessing.
+        - **For each choice A–D:**
+            - **Check if the report supports it ("Supported"), contradicts it ("Contradicted"), or does not mention it ("Not mentioned").**
+            - **Then pick the choice with the strongest textual support.**
+            - **If none are supported, answer "E" (meaning I don't know).**
 
         Respond ONLY in this JSON format:
         {{
@@ -264,7 +448,7 @@ def generate_questions(
     provider: str = "openai",
     model: str = "gpt-4o",
     num_questions: Union[int, Dict[str, int]] = 20,
-    output_path: Optional[str] = None
+    output_path: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Generate multiple-choice questions (MCQs) from a collection of reports.
@@ -274,34 +458,34 @@ def generate_questions(
     questions can be fixed across all reports or customized per report.
 
     Args:
-        reports (List[tuple]): 
+        reports (List[tuple]):
             A list of tuples where each tuple represents a report. Expected format:
             (report_id: str, report_text: str).
-        
-        prompt_template (Callable[[str, int], str]): 
+
+        prompt_template (Callable[[str, int], str]):
             A callable that formats the input text and number of questions into
             a prompt string for the LLM. Signature: (report_text, num_questions) → prompt.
-        
-        provider (str, optional): 
-            The LLM service provider to use (e.g., "openai", "anthropic"). 
+
+        provider (str, optional):
+            The LLM service provider to use (e.g., "openai", "anthropic").
             Defaults to "openai".
-        
-        model (str, optional): 
-            The model name to use for question generation. 
+
+        model (str, optional):
+            The model name to use for question generation.
             Defaults to "gpt-4o".
-        
-        num_questions (Union[int, Dict[str, int]], optional): 
-            - If int: generate the same number of questions for each report.  
-            - If dict: keys are report_ids, values are custom question counts.  
+
+        num_questions (Union[int, Dict[str, int]], optional):
+            - If int: generate the same number of questions for each report.
+            - If dict: keys are report_ids, values are custom question counts.
             Defaults to 20.
-        
-        output_path (Optional[str], optional): 
+
+        output_path (Optional[str], optional):
             If provided, the generated questions will also be written to this
             path as a JSON file. Defaults to None.
-        
+
 
     Returns:
-        List[Dict[str, Any]]: 
+        List[Dict[str, Any]]:
             A list of dictionaries, each containing:
             - "report_id" (str): ID of the source report.
             - "question" (str): The generated question.
@@ -326,10 +510,10 @@ def generate_questions(
 
     for report in tqdm(reports, desc="Processing Reports"):
         task_id = report[0]
-        report_text = report[1] 
+        report_text = report[1]
         prompt = report[2]
         type_report = report[3]
-        
+
         # Decide per-report question count
         if custom_counts:
             count = num_questions.get(task_id)
@@ -345,32 +529,34 @@ def generate_questions(
             mcqs = llm.run(prompt, json_output=True)
             if isinstance(mcqs, list):
                 for q in mcqs:
-                    all_questions.append({
-                        "task_id": task_id,
-                        "question": q.get("question", ""),
-                        "choices": q.get("choices", []),
-                        "answer": q.get("correct", ""),
-                        "question_source": type_report
-                    })
+                    all_questions.append(
+                        {
+                            "task_id": task_id,
+                            "question": q.get("question", ""),
+                            "choices": q.get("choices", []),
+                            "answer": q.get("correct", ""),
+                            "question_source": type_report,
+                        }
+                    )
             else:
                 print(f"[WARNING] Unexpected format for {task_id}")
         except Exception as e:
             print(f"[ERROR] Report {task_id} failed: {e}")
 
     elapsed = time.time() - start_time
-    print(f"[INFO] Completed in {elapsed:.2f} seconds. Total questions: {len(all_questions)}")
-
+    print(
+        f"[INFO] Completed in {elapsed:.2f} seconds. Total questions: {len(all_questions)}"
+    )
 
     if output_path:
         os.makedirs(output_path, exist_ok=True)
-        suffix = (
-            f"{num_questions}" if not custom_counts
-            else f"cus"
+        suffix = str(num_questions) if not custom_counts else "cus"
+        filename = (
+            f"qs{suffix}_rs{type_report}_{provider}_{model.replace('/', '-')}.json"
         )
-        filename = f"qs{suffix}_rs{type_report}_{provider}_{model.replace('/', '-')}.json"
         file_path = os.path.join(output_path, filename)
         try:
-            with open(file_path, 'w', encoding='utf-8') as f:
+            with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(all_questions, f, indent=2, ensure_ascii=False)
             print(f"[INFO] Saved to {file_path}")
         except Exception as e:
@@ -379,13 +565,368 @@ def generate_questions(
     return all_questions
 
 
+def generate_questions_from_breakdown(
+    csv_path: str,
+    provider: str = "openai",
+    model: str = "gpt-4o",
+    output_path: Optional[str] = None,
+    task_filter: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Generate multiple-choice questions from benchmark breakdown CSV.
+    Generates one MCQ per keypoint, batched by task (context + list of keypoints).
+
+    This function loads the benchmark breakdown CSV, groups keypoints by task_id,
+    and generates questions in batches using the Context and all keypoints for
+    each task.
+
+    Args:
+        csv_path (str):
+            Path to the benchmark breakdown CSV file.
+
+        provider (str, optional):
+            The LLM service provider to use (e.g., "openai", "anthropic").
+            Defaults to "openai".
+
+        model (str, optional):
+            The model name to use for question generation.
+            Defaults to "gpt-4o".
+
+        output_path (Optional[str], optional):
+            If provided, the generated questions will also be written to this
+            path as a JSON file. Defaults to None.
+
+        task_filter (Optional[List[str]], optional):
+            If provided, only generate questions for tasks with IDs in this list.
+            Defaults to None (process all tasks).
+
+    Returns:
+        List[Dict[str, Any]]:
+            A list of dictionaries, each containing:
+            - "task_id" (str): Task ID from the CSV
+            - "question_id" (str): Keypoint number as string
+            - "question_source" (str): "groundtruth"
+            - "question" (str): The generated question
+            - "choices" (List[str]): Answer choices for the question
+            - "answer" (str): The correct answer (A, B, C, or D)
+            - "ground_truth_keypoint" (str): The ground truth keypoint text
+            - "fine_grained_prompt" (str): The original fine-grained prompt
+
+    Raises:
+        FileNotFoundError: If the CSV file does not exist.
+        RuntimeError: If the LLM call fails or response parsing fails.
+    """
+    # Load benchmark breakdown data
+    tasks = load_benchmark_breakdown(csv_path)
+
+    if not tasks:
+        print(f"[WARNING] No valid tasks found in {csv_path}")
+        return []
+
+    # Filter tasks if task_filter is provided
+    if task_filter:
+        tasks = [t for t in tasks if t["task_id"] in task_filter]
+        print(f"[INFO] Filtered to {len(tasks)} keypoints matching filter")
+
+    # Group keypoints by task_id
+    task_groups = {}
+    for task in tasks:
+        task_id = task["task_id"]
+        if task_id not in task_groups:
+            task_groups[task_id] = {"context": task["context"], "keypoints": []}
+        task_groups[task_id]["keypoints"].append(
+            {
+                "keypoint_num": task["keypoint_num"],
+                "keypoint": task["ground_truth_keypoint"],
+                "fine_grained_prompt": task.get("fine_grained_prompt", ""),
+            }
+        )
+
+    # Sort keypoints by keypoint_num within each task
+    for task_id in task_groups:
+        task_groups[task_id]["keypoints"].sort(key=lambda x: x["keypoint_num"])
+
+    llm = get_llm(provider, model, api_key=load_openai_key())
+    start_time = time.time()
+
+    num_tasks = len(task_groups)
+    total_keypoints = sum(len(g["keypoints"]) for g in task_groups.values())
+    print(
+        f"[INFO] Generating questions for {total_keypoints} keypoints "
+        f"from {num_tasks} tasks (batched by task)..."
+    )
+    all_questions = []
+
+    # Process each task as a batch
+    for task_id, task_data in tqdm(task_groups.items(), desc="Processing Tasks"):
+        context = task_data["context"]
+        keypoints = task_data["keypoints"]
+
+        # Generate prompt using the batched template
+        llm_prompt = batched_keypoints_template(task_id, context, keypoints)
+
+        try:
+            response = llm.run(llm_prompt, json_output=True)
+
+            # Response should be a list of questions
+            if not isinstance(response, list):
+                print(
+                    f"[WARNING] Expected list for task {task_id}, got {type(response)}"
+                )
+                continue
+
+            # Create a mapping from question_id to keypoint data
+            keypoint_map = {str(kp["keypoint_num"]): kp for kp in keypoints}
+
+            # Process each question in the response
+            task_questions = []
+            for q in response:
+                question_id = str(q.get("question_id", ""))
+                if question_id not in keypoint_map:
+                    print(
+                        f"[WARNING] Question ID {question_id} not found in "
+                        f"keypoints for task {task_id}"
+                    )
+                    continue
+
+                kp_data = keypoint_map[question_id]
+                question_dict = {
+                    "task_id": q.get("task_id", task_id),
+                    "question_id": question_id,
+                    "question_source": q.get("question_source", "groundtruth"),
+                    "question": q.get("question", ""),
+                    "choices": q.get("choices", []),
+                    "answer": q.get("answer", ""),
+                    "ground_truth_keypoint": kp_data.get("keypoint", ""),
+                    "fine_grained_prompt": kp_data.get("fine_grained_prompt", ""),
+                }
+                task_questions.append(question_dict)
+                all_questions.append(question_dict)
+
+            # Verify we got the expected number of questions
+            if len(response) != len(keypoints):
+                print(
+                    f"[WARNING] Task {task_id}: Expected {len(keypoints)} "
+                    f"questions, got {len(response)}"
+                )
+
+            # Save questions for this task
+            if output_path and task_questions:
+                task_output_dir = os.path.join(output_path, task_id)
+                os.makedirs(task_output_dir, exist_ok=True)
+
+                # Format model name: replace slashes with hyphens, hyphens with underscores, keep dots
+                model_name = model.replace("/", "-").replace("-", "_")
+                num_questions = len(task_questions)
+                filename = (
+                    f"qs{num_questions}_rsgroundtruth_{provider}_{model_name}.json"
+                )
+                file_path = os.path.join(task_output_dir, filename)
+
+                try:
+                    with open(file_path, "w", encoding="utf-8") as f:
+                        json.dump(task_questions, f, indent=2, ensure_ascii=False)
+                    print(
+                        f"[INFO] Saved {num_questions} questions for task "
+                        f"{task_id} to {file_path}"
+                    )
+                except Exception as e:
+                    print(f"[ERROR] Saving failed for task {task_id}: {e}")
+
+        except Exception as e:
+            print(f"[ERROR] Task {task_id} failed: {e}")
+            continue
+
+    elapsed = time.time() - start_time
+    print(
+        f"[INFO] Completed in {elapsed:.2f} seconds. "
+        f"Total questions: {len(all_questions)}"
+    )
+
+    return all_questions
+
+
+def respond_questions_from_breakdown(
+    task_ids: List[str],
+    csv_path: str,
+    questions_dir: str,
+    answers_dir: str,
+    report_columns: List[str],
+    provider: str = "openai",
+    model: str = "gpt-4o",
+) -> None:
+    """
+    Automatically traverse task IDs, load questions, and answer them using
+    reports from CSV.
+
+    Args:
+        task_ids: List of task IDs to process (e.g., ["1", "2.1", "3.1"])
+        csv_path: Path to benchmark_verified.csv
+        questions_dir: Directory containing question JSON files
+                      (e.g., "output/questions_new")
+        answers_dir: Directory to save answered questions
+                    (e.g., "output/answers_new")
+        report_columns: List of CSV column names to use as reports
+                       (e.g., ["Discovera (o4-mini)", "LLM (o4-mini)", "Biomni (o4-mini)"])
+        provider: LLM provider (e.g., "openai")
+        model: LLM model name (e.g., "gpt-4o")
+    """
+    llm = get_llm(provider, model, api_key=load_openai_key())
+
+    # Load CSV data
+    print(f"[INFO] Loading reports from {csv_path}...")
+    csv_data = {}
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        reader.fieldnames = [h.strip() for h in reader.fieldnames]
+        for row in reader:
+            task_id = row.get("ID", "").strip()
+            if task_id:
+                csv_data[task_id] = row
+
+    print(f"[INFO] Found {len(csv_data)} tasks in CSV")
+
+    # Process each task ID
+    for task_id in tqdm(task_ids, desc="Processing Tasks"):
+        # Find question files for this task
+        task_questions_dir = os.path.join(questions_dir, task_id)
+        if not os.path.exists(task_questions_dir):
+            print(f"[WARNING] Questions directory not found: {task_questions_dir}")
+            continue
+
+        # Find all JSON files in the task directory
+        question_files = [
+            f for f in os.listdir(task_questions_dir) if f.endswith(".json")
+        ]
+
+        if not question_files:
+            print(f"[WARNING] No question files found in {task_questions_dir}")
+            continue
+
+        # Process each question file
+        for question_file in question_files:
+            question_path = os.path.join(task_questions_dir, question_file)
+
+            # Load questions
+            try:
+                with open(question_path, "r", encoding="utf-8") as f:
+                    questions = json.load(f)
+            except Exception as e:
+                print(f"[ERROR] Failed to load {question_path}: {e}")
+                continue
+
+            if not isinstance(questions, list) or not questions:
+                print(f"[WARNING] Invalid questions format in {question_path}")
+                continue
+
+            # Get CSV row for this task
+            csv_row = csv_data.get(task_id)
+            if not csv_row:
+                print(f"[WARNING] Task {task_id} not found in CSV")
+                continue
+
+            # Answer questions using each report column
+            for report_column in report_columns:
+                report_text = csv_row.get(report_column, "").strip()
+                if not report_text:
+                    print(
+                        f"[WARNING] Empty report for task {task_id}, "
+                        f"column {report_column}"
+                    )
+                    continue
+
+                # Generate source name from column name
+                # e.g., "Discovera (o4-mini)" -> "discovera(o4-mini)"
+                source_name = report_column.lower().replace(" ", "")
+
+                # Answer questions
+                results = []
+                print(
+                    f"[INFO] Answering {len(questions)} questions for task "
+                    f"{task_id} using {report_column}..."
+                )
+
+                for q in tqdm(questions, desc=f"Task {task_id}"):
+                    prompt = answer_prompt_template(
+                        q["question"], q["choices"], report=report_text
+                    )
+                    try:
+                        response = llm.run(prompt, json_output=True)
+                        results.append(
+                            {
+                                "task_id": q.get("task_id", task_id),
+                                "question_id": q.get("question_id", ""),
+                                "question": q.get("question", ""),
+                                "question_source": q.get(
+                                    "question_source", "groundtruth"
+                                ),
+                                "choices": q.get("choices", []),
+                                "answer": q.get("answer", ""),
+                                "prediction": response.get("answer", None),
+                                "confidence": response.get("confidence", None),
+                                "report_source": source_name,
+                            }
+                        )
+                    except Exception as e:
+                        print(
+                            f"[ERROR] Failed to answer question for task "
+                            f"{task_id}: {e}"
+                        )
+                        results.append(
+                            {
+                                "task_id": q.get("task_id", task_id),
+                                "question_id": q.get("question_id", ""),
+                                "question": q.get("question", ""),
+                                "question_source": q.get(
+                                    "question_source", "groundtruth"
+                                ),
+                                "choices": q.get("choices", []),
+                                "answer": q.get("answer", ""),
+                                "prediction": None,
+                                "confidence": None,
+                                "report_source": source_name,
+                                "error": str(e),
+                            }
+                        )
+
+                # Save results
+                if results:
+                    task_answers_dir = os.path.join(answers_dir, task_id)
+                    os.makedirs(task_answers_dir, exist_ok=True)
+
+                    # Extract number of questions from question filename
+                    # e.g., "qs12_rsgroundtruth_openai_gpt_5_nano.json" -> "qs12"
+                    qs_match = question_file.split("_")[0]  # "qs12"
+                    num_questions = (
+                        qs_match.replace("qs", "")
+                        if qs_match.startswith("qs")
+                        else str(len(results))
+                    )
+
+                    # Format model name
+                    model_name = model.replace("/", "-").replace("-", "_")
+
+                    # Create answer filename
+                    answer_filename = f"ans{num_questions}_rs{source_name}_{provider}_{model_name}.json"
+                    answer_path = os.path.join(task_answers_dir, answer_filename)
+
+                    try:
+                        with open(answer_path, "w", encoding="utf-8") as f:
+                            json.dump(results, f, indent=2, ensure_ascii=False)
+                        print(f"[INFO] Saved {len(results)} answers to {answer_path}")
+                    except Exception as e:
+                        print(f"[ERROR] Failed to save answers to {answer_path}: {e}")
+
+    print("[INFO] Completed processing all tasks")
+
+
 def respond_question(
     questions: List[Dict],
     provider: str = "openai",
     model: str = "gpt-4o",
     reports: list[tuple[str, str]] = None,
-    output_path: str = None
-    ) -> List[Dict]:
+    output_path: str = None,
+) -> List[Dict]:
     """
     Evaluate MCQs by asking an LLM to answer them, optionally using the associated report text.
 
@@ -398,79 +939,210 @@ def respond_question(
     Returns:
         List of dicts with answer, confidence, question, correct answer, etc.
     """
-    reports_dict = {r[0]: r[1] for r in reports}
     llm = get_llm(provider, model, api_key=load_openai_key())
-    start_time = time.time()
 
-    print(f"[INFO] Starting to answer questions ...\n")
-    results = []
+    layered_reports = {r[3]: dict() for r in reports}
+    for report in reports:
+        layered_reports[report[3]][report[0]] = report[1]
+
+    print("[INFO] Starting to answer questions ...\n")
     # 1. Count how many questions are associated with each report
     report_question_counts = Counter(q["task_id"] for q in questions)
     counts = list(report_question_counts.values())
-    report_type = reports[0][-1]
     # 2. Determine the mode of question counts per report
     try:
         questions_mode = mode(counts)
     except StatisticsError:
         # Fallback when no unique mode; pick most common
         questions_mode = Counter(counts).most_common(1)[0][0]
+    for source, report_dict in layered_reports.items():
+        results = []
+        print(f"[INFO] Answering questions for report source: {source} ...\n")
+        for q in tqdm(questions, desc="Answering Questions"):
+            report = report_dict.get(str(q["task_id"]), "")
+            prompt = answer_prompt_template(q["question"], q["choices"], report=report)
+            try:
+                response = llm.run(prompt, json_output=True)
+                results.append(
+                    {
+                        "task_id": q["task_id"],
+                        "question": q["question"],
+                        "question_source": q["question_source"],
+                        "choices": q["choices"],
+                        "answer": q["answer"],
+                        "prediction": response.get("answer", None),
+                        "confidence": response.get("confidence", None),
+                        "report_source": source,
+                    }
+                )
+            except Exception as e:
+                print(f"[Error] report {q['task_id']} - {e}")
+                results.append(
+                    {
+                        "task_id": q["task_id"],
+                        "question": q["question"],
+                        "question_source": q["question_source"],
+                        "choices": q["choices"],
+                        "answer": q["answer"],
+                        "prediction": None,
+                        "confidence": None,
+                        "report_source": source,
+                        "error": str(e),
+                    }
+                )
 
-    for q in tqdm(questions, desc= "Answering Questions"):
+        if output_path:
+            os.makedirs(output_path, exist_ok=True)
+            filename = f"ans{questions_mode}_rs{source}_{provider}_{model.replace('/', '-')}.json"
+            file_path = os.path.join(output_path, filename)
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(results, f, indent=2, ensure_ascii=False)
+            print(f"[INFO] Saved to {file_path}")
 
-        if reports == None:
-            print(f"[INFO] Answering questions without access to report text ...\n")
-            prompt = answer_prompt_template(q["question"], q["choices"], report=None)
 
-        else:
-            task_id = q["task_id"]
+def generate_score_comparison_table(
+    answers_dir: str, task_ids: Optional[List[str]] = None
+) -> pd.DataFrame:
+    """
+    Read answer files from the answers directory and generate a score
+    comparison table showing accuracy breakdowns by task, method, and model.
 
-            # Convert to string intelligently
-            if isinstance(task_id, float) and task_id.is_integer():
-                idx = str(int(task_id))
-            else:
-                idx = str(task_id)
-            report_text = reports_dict.get(idx)
-            print(f"[INFO] Accessing report text for question from report {idx} ...\n {report_text[:100]}...\n")
-            
-            print(f"[INFO] Answering questions with access to report text ...\n")            
-            prompt = answer_prompt_template(q["question"], q["choices"], report=report_text)
-            # print(prompt)
+    Args:
+        answers_dir: Directory containing answer JSON files
+                    (e.g., "output/answers_new")
+        task_ids: Optional list of task IDs to process. If None, processes
+                 all tasks found in the directory.
 
-        try:
-            response = llm.run(prompt, json_output=True)
-            results.append({
-                "task_id": idx,
-                "question": q["question"],
-                "question_source": q["question_source"],
-                "choices": q["choices"],
-                "answer": q["answer"],
-                "prediction": response.get("answer", None),
-                "confidence": response.get("confidence", None),
-                "report_source": report_type
-            })
-        except Exception as e:
-            print(f"[Error] report {q['task_id']} - {e}")
-            results.append({
-                "task_id": idx,
-                "question": q["question"],
-                "question_source": q["question_source"],
-                "choices": q["choices"],
-                "answer": q["answer"],
-                "prediction": None,
-                "confidence": None,
-                "report_source": report_type,
-                "error": str(e)
-            })
-    total_time = time.time() - start_time
-    print(f"\n[INFO] Question generation completed in {total_time:.2f} seconds.")
-    print(f"[INFO] Total questions answers: {len(results)}")
-    if output_path:
-        # Ensure output_path is a directory
-        os.makedirs(output_path, exist_ok=True)
-        filename = f"ans{questions_mode}_rs{report_type}_{provider}_{model.replace('/', '-')}.json"
-        file_path = os.path.join(output_path, filename)
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(results, f, indent=2, ensure_ascii=False)
-        print(f"[INFO] Saved to {file_path}")
+    Returns:
+        pd.DataFrame: Comparison table with columns:
+            - task_id: Task ID
+            - report_source: Report source (e.g., "discovera(o4-mini)")
+            - provider: LLM provider (e.g., "openai")
+            - model: Model name (e.g., "gpt_5_nano")
+            - total_questions: Total number of questions
+            - correct: Number of correct answers
+            - accuracy: Accuracy score (0-1)
+            - avg_confidence: Average confidencse score
+    """
+    all_results = []
 
-    return results
+    # Get all task directories
+    if task_ids is None:
+        # Find all task directories
+        task_dirs = [
+            d
+            for d in os.listdir(answers_dir)
+            if os.path.isdir(os.path.join(answers_dir, d))
+        ]
+    else:
+        task_dirs = task_ids
+
+    print(f"[INFO] Processing {len(task_dirs)} tasks from {answers_dir}...")
+
+    for task_id in tqdm(task_dirs, desc="Processing Tasks"):
+        task_dir = os.path.join(answers_dir, task_id)
+        if not os.path.isdir(task_dir):
+            continue
+
+        # Find all JSON answer files in this task directory
+        answer_files = glob.glob(os.path.join(task_dir, "*.json"))
+
+        for answer_file in answer_files:
+            try:
+                with open(answer_file, "r", encoding="utf-8") as f:
+                    answers = json.load(f)
+
+                if not isinstance(answers, list) or not answers:
+                    continue
+
+                # Extract metadata from filename
+                # Format: ans{num}_rs{source}_{provider}_{model}.json
+                filename = os.path.basename(answer_file)
+                parts = filename.replace(".json", "").split("_")
+
+                # Parse filename components
+                report_source = None
+                provider = None
+                model = None
+
+                # Find report_source (starts with "rs")
+                for i, part in enumerate(parts):
+                    if part.startswith("rs"):
+                        report_source = part[2:]  # Remove "rs" prefix
+                        if i + 1 < len(parts):
+                            provider = parts[i + 1]
+                        if i + 2 < len(parts):
+                            model = "_".join(parts[i + 2 :])  # Join remaining parts
+                        break
+
+                if not report_source or not provider or not model:
+                    # Try alternative parsing
+                    if len(parts) >= 4:
+                        report_source = (
+                            parts[1].replace("rs", "")
+                            if parts[1].startswith("rs")
+                            else parts[1]
+                        )
+                        provider = parts[2] if len(parts) > 2 else None
+                        model = "_".join(parts[3:]) if len(parts) > 3 else None
+
+                # Calculate scores
+                total_questions = len(answers)
+                correct = 0
+                confidences = []
+
+                for ans in answers:
+                    if ans.get("answer") and ans.get("prediction"):
+                        if str(ans["answer"]).upper() == str(ans["prediction"]).upper():
+                            correct += 1
+                    if ans.get("confidence") is not None:
+                        confidences.append(ans["confidence"])
+
+                accuracy = correct / total_questions if total_questions > 0 else 0.0
+                avg_confidence = (
+                    sum(confidences) / len(confidences) if confidences else None
+                )
+
+                all_results.append(
+                    {
+                        "task_id": task_id,
+                        "report_source": report_source,
+                        "provider": provider,
+                        "model": model,
+                        "total_questions": total_questions,
+                        "correct": correct,
+                        "accuracy": accuracy,
+                        "avg_confidence": avg_confidence,
+                        "filename": filename,
+                    }
+                )
+
+            except Exception as e:
+                print(f"[WARNING] Failed to process {answer_file}: {e}")
+                continue
+
+    # Create DataFrame
+    if not all_results:
+        print("[WARNING] No results found. Returning empty DataFrame.")
+        return pd.DataFrame(
+            columns=[
+                "task_id",
+                "report_source",
+                "provider",
+                "model",
+                "total_questions",
+                "correct",
+                "accuracy",
+                "avg_confidence",
+            ]
+        )
+
+    df = pd.DataFrame(all_results)
+
+    # Sort by task_id, then report_source, then model
+    df = df.sort_values(
+        by=["task_id", "report_source", "model"], ascending=[True, True, True]
+    ).reset_index(drop=True)
+
+    print(f"[INFO] Generated comparison table with {len(df)} rows")
+    return df
