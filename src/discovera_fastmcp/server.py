@@ -60,6 +60,7 @@ from src.discovera_fastmcp.pydantic import (
     QueryStringRummaInput,
     QueryTableRummaInput,
     RunDeseq2GseaInput,
+    RunDeseq2OraInput,
     SetsInfoRummInput,
     StorageGetInput,
     StorageListInput,
@@ -844,6 +845,216 @@ def create_server():
             return _exception_payload("gsea_pipe", e, context)
 
     @mcp.tool
+    async def run_deseq2_ora_pipe(
+        ctx: Context,
+        raw_counts_csv_id: str,
+        sample_groups: Optional[Dict[str, List[str]]] = None,
+        gene_column: Optional[str] = None,
+        gene_sets: Optional[List[str]] = None,
+        fdr_threshold: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """
+        Performs DESeq2 differential expression (DE) from raw RNA‑seq counts, then runs
+        Over-Representation Analysis (ORA) on the significant DE genes to identify enriched pathways.
+
+        High-level behavior
+        - Input: a raw counts matrix (genes × samples) and a mapping of samples to groups.
+        - Step 1 (DE): Runs DESeq2 to compute per-gene statistics including adjusted p-values (padj).
+        - Step 2 (Filter): Selects significant genes by FDR threshold (default padj < 0.2).
+        - Step 3 (ORA): Performs enrichment using Enrichr libraries on the significant gene list.
+        - Output: Top ORA results in the immediate response + storage IDs for full ORA table
+          (use CSV tools to fetch all rows).
+
+        Args:
+            raw_counts_csv_id (str):
+                Storage ID for the raw counts CSV (genes × samples). One column must hold gene identifiers
+                (see `gene_column`). Prefer raw counts over normalized matrices.
+            sample_groups (Optional[Dict[str, List[str]]]):
+                Mapping of {group_name: [sample_id, ...]} used to build DE design (default ~ group).
+                Numeric sample patterns like "3_1", "3_2", "7_1" are supported.
+                e.g.
+                sample_groups = {
+                    "CBD":  ["3_1", "3_2", "3_3"],
+                    "DMSO": ["7_1", "7_2", "7_3"],
+                }
+            gene_column (str, optional):
+                Column name in the raw counts CSV that contains gene identifiers.
+                Defaults to "Unnamed: 0" (first column in typical count tables).
+            gene_sets (Optional[List[str]]):
+                Gene set libraries for ORA. Defaults to ["MSigDB_Hallmark_2020", "KEGG_2021_Human"].
+            fdr_threshold (float, optional):
+                FDR (padj) threshold used to select significant genes for ORA. Defaults to 0.2.
+
+        Returns:
+            Dict[str, Any] with keys including:
+                - ora_results: Preview of ORA results (records). Typically top 20 rows.
+                - ora_result_metadata: Storage entry for the full ORA results CSV (if saved during run).
+        """
+        # Validate/construct params
+        params = _validate_params(
+            {
+                "raw_counts_csv_id": raw_counts_csv_id,
+                "sample_groups": sample_groups,
+                "gene_column": gene_column,
+                "gene_sets": gene_sets,
+                "fdr_threshold": fdr_threshold,
+            },
+            RunDeseq2OraInput,
+            "run_deseq2_ora_pipe",
+        )
+
+        try:
+            # Resolve paths
+            raw_counts_path = _resolve_path_from_id(params.raw_counts_csv_id)
+            if not raw_counts_path:
+                raise ValueError("Provide raw_counts_csv_id")
+
+            raw_counts_df = pd.read_csv(raw_counts_path)
+
+            # Build sample metadata DataFrame from mapping or infer heuristically
+            sample_col_name = "SampleID"
+            group_col_name = "Group"
+            gene_col = params.gene_column or "Unnamed: 0"
+            sample_cols = [c for c in raw_counts_df.columns if c != gene_col]
+
+            if params.sample_groups:
+                records: list[dict[str, str]] = []
+                for group_name, sample_ids in (params.sample_groups or {}).items():
+                    for sid in sample_ids or []:
+                        if sid in sample_cols:
+                            records.append(
+                                {
+                                    sample_col_name: str(sid),
+                                    group_col_name: str(group_name),
+                                }
+                            )
+                if not records:
+                    raise ValueError(
+                        "sample_groups provided but no matching sample IDs found in raw counts columns"
+                    )
+                sample_meta_df = pd.DataFrame.from_records(records)
+                # Ensure raw counts are restricted and ordered to the provided samples
+                sample_order = [r[sample_col_name] for r in records]
+                # Deduplicate while preserving order
+                seen: set[str] = set()
+                sample_order = [
+                    s for s in sample_order if not (s in seen or seen.add(s))
+                ]
+                # Restrict columns to gene + selected samples (in the given order)
+                kept_cols = [gene_col] + [
+                    s for s in sample_order if s in raw_counts_df.columns
+                ]
+                raw_counts_df = raw_counts_df[kept_cols]
+            else:
+                # Naive inference: take token before '_' as group label
+                records = []
+                for c in sample_cols:
+                    group_guess = str(c).split("_")[0]
+                    records.append(
+                        {sample_col_name: str(c), group_col_name: group_guess}
+                    )
+                sample_meta_df = pd.DataFrame.from_records(records)
+                # Keep all sample columns and preserve their original order
+                kept_cols = [gene_col] + [c for c in sample_cols]
+                raw_counts_df = raw_counts_df[kept_cols]
+
+            # start sending heartbeat
+            heartbeat_task = start_keepalive(ctx, 5.0)
+
+            # Run DESeq2
+            de_results = await asyncio.get_running_loop().run_in_executor(
+                CPU_POOL,
+                functools.partial(
+                    run_deseq2,
+                    raw_counts_df,
+                    sample_meta_df,
+                    params.gene_column,
+                    sample_col_name,
+                    group_col_name,
+                ),
+            )
+
+            # cancel heartbeat
+            heartbeat_task.cancel()
+
+            # Save full DESeq2 results and register (for traceability)
+            _save_dataframe_csv(
+                de_results, filename=f"deseq2_results_{params.raw_counts_csv_id}.csv"
+            )
+
+            # Filter significant genes by padj < FDR threshold (default 0.2)
+            thr = params.fdr_threshold if params.fdr_threshold is not None else 0.2
+            sig_df = de_results.copy()
+            if "padj" not in sig_df.columns:
+                raise ValueError("DESeq2 results missing 'padj' column")
+            sig_df = sig_df[sig_df["padj"].notna() & (sig_df["padj"] < float(thr))]
+            sig_df = sig_df[["GeneID"]].dropna()
+
+            if sig_df.empty:
+                logger.info(
+                    "[run_deseq2_ora_pipe] No DE genes pass FDR threshold %s", thr
+                )
+                return {"ora_results": [], "ora_result_metadata": {}}
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            # start sending heartbeat for ORA
+            heartbeat_task = start_keepalive(ctx, 5.0)
+
+            ora_results = await asyncio.get_running_loop().run_in_executor(
+                CPU_POOL,
+                functools.partial(
+                    nrank_ora,
+                    dataset=sig_df,
+                    gene_sets=params.gene_sets,
+                    gene_col="GeneID",
+                    # Use internal default p_value_threshold=0.2
+                    timestamp=timestamp,
+                ),
+            )
+
+            # cancel heartbeat
+            heartbeat_task.cancel()
+
+            if isinstance(ora_results, dict):
+                ora_results = pd.DataFrame(ora_results)
+
+            if ora_results is None or len(ora_results) == 0:
+                logger.info("[run_deseq2_ora_pipe] No ORA results after filtering")
+                return {"ora_results": [], "ora_result_metadata": {}}
+
+            _ensure_dir("output")
+            csv_path = os.path.join("output", f"ora_results_{timestamp}.csv")
+
+            ora_result_metadata = None
+            try:
+                if os.path.exists(csv_path):
+                    ora_result_metadata = _register_file(
+                        csv_path, category="generated", to_s3=True
+                    )
+            except Exception:
+                pass
+
+            logger.info(
+                "[run_deseq2_ora_pipe] DE FDR<%s genes: %d; ORA matches: %d",
+                thr,
+                len(sig_df),
+                len(ora_results),
+            )
+            return {
+                "ora_results": ora_results.to_dict(orient="records"),
+                "ora_result_metadata": ora_result_metadata,
+            }
+        except Exception as e:
+            context = {
+                "raw_counts_csv_id": raw_counts_csv_id,
+                "gene_column": gene_column,
+                "gene_sets": gene_sets,
+                "fdr_threshold": fdr_threshold,
+            }
+            return _exception_payload("run_deseq2_ora_pipe", e, context)
+
+    @mcp.tool
     async def query_genes(
         ctx: Context,
         genes: List[str],
@@ -1574,6 +1785,7 @@ def create_server():
             compressed = {}
 
         # Register the saved plot if present
+        literature_plot_metadata = None
         try:
             if save_path and os.path.exists(save_path):
                 literature_plot_metadata = _register_file(
