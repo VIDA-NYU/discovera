@@ -654,3 +654,39 @@ Filter GSEA results by p-value.
 Filter GSEA results by FDR.
 """,
     )
+
+
+class RunDeseq2OraInput(BaseModel):
+    raw_counts_csv_id: str = Field(
+        description="""
+ID of stored CSV containing raw counts (genes × samples). One column contains gene IDs.
+"""
+    )
+    sample_groups: Optional[Dict[str, List[str]]] = Field(
+        default=None,
+        description="""
+Mapping of {group_name: [sample_id, ...]} used to construct sample metadata directly
+from raw count column names (no separate metadata CSV required).
+""",
+    )
+    gene_column: Optional[str] = Field(
+        default="Unnamed: 0",
+        description="""
+Column name in raw counts holding gene identifiers.
+""",
+    )
+    gene_sets: Optional[List[str]] = Field(
+        default=[
+            "MSigDB_Hallmark_2020",
+            "KEGG_2021_Human",
+        ],
+        description="""
+Gene set libraries to use in downstream ORA.
+""",
+    )
+    fdr_threshold: Optional[float] = Field(
+        default=0.2,
+        description="""
+Filter DE genes by adjusted p-value (FDR) before ORA.
+""",
+    )
