@@ -16,9 +16,13 @@ MODELS=("gpt-5")
 # List of report columns
 REPORT_COLUMNS=(
   #"LLM (gpt-4o)" 
-  "Discovera (gpt-4o)" 
+  #"LLM (o4-mini)"
+  #"Discovera (gpt-4o)" 
+  #"Discovera (o4-mini)"
   #"Ground Truth"
   #"Biomni"
+  #"Biomni (11-05-25)"
+  "Biomni (o4-mini)"
   )
 
 # ------------------------

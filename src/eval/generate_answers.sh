@@ -4,7 +4,7 @@ set -euo pipefail
 # ---------------------------
 # Configuration
 # ---------------------------
-EXPERIMENT="gpt-5_20251009_062846"
+EXPERIMENT="gpt-5_20251114_005339"
 BENCHMARK="../../data/benchmark/benchmark.csv"
 PYTHON=python3  # or path to your venv python
 
@@ -15,7 +15,12 @@ BASE="groundtruth"
 COMPARES=(
     #"discovera(gpt-4o)" 
     #"llm(gpt-4o)"
-    "biomni"
+    #"llm(o4-mini)"
+    #"discovera(o4-mini)"
+    #"biomni"
+    #"biomni(11-05-25)"
+    "biomni(o4-mini)"
+    "biomni(claude-3.5-haiku)"
     )
 
 # ---------------------------

@@ -33,7 +33,12 @@ REPORT_TO_COLUMN = {
     "discovera(gpt-4o)": "Discovera (gpt-4o)",
     "llm(gpt-4o)": "LLM (gpt-4o)",
     "groundtruth": "Ground Truth",
-    "biomni": "Biomni"
+    "discovera(o4-mini)": "Discovera (o4-mini)",
+    #"biomni": "Biomni",
+    "biomni(11-05-25)": "Biomni (11-05-25)",
+    "llm(o4-mini)": "LLM (o4-mini)",
+    "biomni(o4-mini)": "Biomni (o4-mini)"
+
     # Add more mappings here if needed
 }
 
@@ -112,7 +117,7 @@ def main():
     base_column = REPORT_TO_COLUMN.get(args.base)
     print(f"Base column mapped: {base_column}")
     compare_column = REPORT_TO_COLUMN.get(args.compare)
-    print(f"Base column mapped: {compare_column}")
+    print(f"Compared column mapped: {compare_column}")
 
     if base_column is None or compare_column is None:
         raise ValueError(f"Could not find benchmark column mapping for base '{args.base}' or compare '{args.compare}'")
@@ -130,14 +135,19 @@ def main():
 
     # Efficiently load questions from base and compare JSONs
     report_keywords = [args.base, args.compare]
+    # uncomment above and remove this soon, right now we are only checking how much of the ground truth questions are answered
+    # but to follow the whole methodology we need both base and compare questions
+    #report_keywords = [args.base]
+    #report_keywords = [args.compare]
+
     all_questions = load_questions_from_reports(questions_folder, report_keywords)
     pair_folder = answers_folder / f"{args.base}_vs_{args.compare}"
     pair_folder.mkdir(exist_ok=True)
 
-    # Generate answers for both benchmark columns
-    columns_to_generate = [base_column, compare_column]
+    # Generate answers using as context both types of reports: llm-generated and groundtruth
+    columns_to_compare = [compare_column, base_column]
 
-    for col in columns_to_generate:
+    for col in columns_to_compare:
         logging.info(f"Loading reports from benchmark column: {col}")
         reports = load_reports(args.benchmark, report_column=col)
         logging.info(f"Generating answers (model={args.model}, base={args.base}, compare={args.compare}, column={col})")

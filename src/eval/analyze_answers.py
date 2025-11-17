@@ -28,7 +28,7 @@ sys.path.append(os.path.abspath(module_dir))
 # Import functions
 # -----------------------------
 
-from src.eval.evaluation import calculate_agreement, agreement_x_analysis, load_and_merge_reports
+from src.eval.evaluation import calculate_agreement, agreement_x_analysis, load_and_merge_reports, plot_task_heatmaps_by_source
 
 
 def parse_args():
@@ -118,8 +118,10 @@ def main():
     # -----------------------------
     # Calculate agreement
     # -----------------------------
-    calculate_agreement(df, analysis_folder)
+    _, _, df_new = calculate_agreement(df, analysis_folder)
 
+    p = plot_task_heatmaps_by_source(df_new)
+    p
     # -----------------------------
     # Perform further analysis
     # -----------------------------

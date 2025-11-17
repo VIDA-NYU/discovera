@@ -9,11 +9,11 @@ PYTHON_SCRIPT="biomni_reports.py"
 
 BENCHMARK="../../data/benchmark/benchmark.csv"
 TASKS_FOLDER="../../data/benchmark/tasks"
-LOGS_FOLDER="../../biomni_logs"
-OUTPUT_CSV="../../biomni_results_0.csv"
+LOGS_FOLDER="../../output/biomni/logs"
+OUTPUT_CSV="../../output/biombi/biomni_results.csv"
 
 # Comma-separated list of task IDs to process, OPTIONAL.
-TASK_IDS="7.2,8, 9.1, 9.2, 9.3, 9.4, 9.5, 10, 11.1, 11.2, 11.3, 12"
+TASK_IDS="11.3, 12"
 
 # Optional experiment name
 EXPERIMENT="${1:-biomni_run_$(date +%Y%m%d_%H%M%S)}"

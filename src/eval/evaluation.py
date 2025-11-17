@@ -1,7 +1,6 @@
 import pandas as pd
 import os
 import json
-import numpy as np
 import torch
 from sentence_transformers import SentenceTransformer, util
 from rouge_score import rouge_scorer
@@ -63,18 +62,17 @@ def load_and_merge_reports(
 
     return merged
 
-
 def calculate_agreement(df, output_dir="../../output/"):
     """
-    Calculate agreement/disagreement 
-    at dataset and subset levels. Meaning per question.
+    Calculate agreement/disagreement per question and per dataset subset.
     Automatically detect prediction columns and compare the first two found.
+
     Args:
         df: pandas DataFrame containing at least two columns with 'prediction' in their names.
+        output_dir: directory to save results.
 
     Returns:
-        Dictionary containing agreement/disagreement percentages overall,
-        and separately for GT and generated report questions.
+        Tuple: (summary_dict, summary_df, detailed_df)
     """
     try:
         # --- Helpers ---
@@ -132,27 +130,186 @@ def calculate_agreement(df, output_dir="../../output/"):
             f'agreement_{gen_suffix}': agreement_gen
         }
 
-        # --- Create tidy DataFrame ---
+        # --- Create summary DataFrame ---
         results_df = pd.DataFrame([
             {"level": "overall", **overall},
             {"level": f"{gt_suffix}_questions", **agreement_gt},
             {"level": f"{gen_suffix}_questions", **agreement_gen}
         ])
 
-        # --- Save CSV if requested ---
+        # --- Create detailed per-question DataFrame ---
+        detailed_df = df.copy()
+        detailed_df["agreement"] = (df[col1] == df[col2]).astype(int)
+        detailed_df["agree_label"] = detailed_df["agreement"].map({1: "agree", 0: "disagree"})
+        detailed_df = detailed_df[
+            ["task_id", "question", "question_source", col1, col2, "agreement", "agree_label"]
+        ].sort_values(["task_id", "question_source", "question"])
+
+        # --- Save both CSVs ---
         if output_dir:
-            results_df.to_csv(os.path.join(output_dir, "accuracy_precision_recall.csv"), index=False)
-            print(f"Results saved to {output_dir}")
+            os.makedirs(output_dir, exist_ok=True)
+            results_df.to_csv(os.path.join(output_dir, "agreement_summary.csv"), index=False)
+            detailed_df.to_csv(os.path.join(output_dir, "agreement_per_question.csv"), index=False)
+            print(f"Saved summary and per-question files to {output_dir}")
 
         # --- Pretty printing ---
-        print(f"=== Comparing: {col1} vs {col2} ===\n")
+        print(f"\n=== Comparing: {col1} vs {col2} ===\n")
         print(results_df.to_string(index=False))
 
-        return results_dict, results_df
+        return results_dict, results_df, detailed_df
 
     except Exception as e:
         print(f"Error calculating dataset agreement: {e}")
-        return None, None
+        return None, None, None
+
+
+# def calculate_agreement(df, output_dir="../../output/"):
+#     """
+#     Calculate agreement/disagreement 
+#     at dataset and subset levels. Meaning per question.
+#     Automatically detect prediction columns and compare the first two found.
+#     Args:
+#         df: pandas DataFrame containing at least two columns with 'prediction' in their names.
+
+#     Returns:
+#         Dictionary containing agreement/disagreement percentages overall,
+#         and separately for GT and generated report questions.
+#     """
+#     try:
+#         # --- Helpers ---
+#         def get_suffix(col_name: str) -> str:
+#             """Extract suffix after 'prediction_' (e.g., 'gt', 'llm', 'noreport')."""
+#             return col_name.split("prediction_")[-1]
+
+#         def _compute_agreement(sub_df, col_a, col_b):
+#             """Compute agreement stats between two prediction columns."""
+#             total = len(sub_df)
+#             if total == 0:
+#                 return {
+#                     'total_questions': 0,
+#                     'agreement_count': 0,
+#                     'disagreement_count': 0,
+#                     'agreement_percentage': None,
+#                     'disagreement_percentage': None
+#                 }
+#             agreements = sub_df[col_a] == sub_df[col_b]
+#             agreement_count = int(agreements.sum())
+#             disagreement_count = total - agreement_count
+#             return {
+#                 'total_questions': total,
+#                 'agreement_count': agreement_count,
+#                 'disagreement_count': disagreement_count,
+#                 'agreement_percentage': round((agreement_count / total) * 100, 2),
+#                 'disagreement_percentage': round((disagreement_count / total) * 100, 2)
+#             }
+
+#         # --- Find prediction columns ---
+#         pred_cols = [col for col in df.columns if "prediction" in col.lower()]
+#         if len(pred_cols) < 2:
+#             raise ValueError(f"Expected at least two 'prediction' columns, found: {pred_cols}")
+
+#         col1, col2 = pred_cols[:2]
+#         suffix1, suffix2 = get_suffix(col1), get_suffix(col2)
+
+#         # --- Assign GT vs generated report ---
+#         if suffix1 in ("gt", "groundtruth"):
+#             gt_col, gen_col = col1, col2
+#             gt_suffix, gen_suffix = suffix1, suffix2
+#         else:
+#             gt_col, gen_col = col2, col1
+#             gt_suffix, gen_suffix = suffix2, suffix1
+
+#         # --- Compute agreements ---
+#         overall = _compute_agreement(df, col1, col2)
+#         agreement_gt = _compute_agreement(df[df['question_source'] == gt_suffix], gt_col, gen_col)
+#         agreement_gen = _compute_agreement(df[df['question_source'] == gen_suffix], gt_col, gen_col)
+
+#         results_dict = {
+#             'columns_compared': (col1, col2),
+#             'overall': overall,
+#             f'agreement_{gt_suffix}': agreement_gt,
+#             f'agreement_{gen_suffix}': agreement_gen
+#         }
+
+#         # --- Create tidy DataFrame ---
+#         results_df = pd.DataFrame([
+#             {"level": "overall", **overall},
+#             {"level": f"{gt_suffix}_questions", **agreement_gt},
+#             {"level": f"{gen_suffix}_questions", **agreement_gen}
+#         ])
+
+#         # --- Save CSV if requested ---
+#         if output_dir:
+#             results_df.to_csv(os.path.join(output_dir, "accuracy_precision_recall.csv"), index=False)
+#             print(f"Results saved to {output_dir}")
+
+#         # --- Pretty printing ---
+#         print(f"=== Comparing: {col1} vs {col2} ===\n")
+#         print(results_df.to_string(index=False))
+
+#         return results_dict, results_df
+
+#     except Exception as e:
+#         print(f"Error calculating dataset agreement: {e}")
+#         return None, None
+
+from plotnine import (
+    ggplot, aes, geom_tile,
+    scale_fill_manual, labs, theme_bw, theme, element_text
+)
+
+def plot_task_heatmaps_by_source(df, output_dir="../../output/"):
+    """
+    Generate one heatmap per question_source, showing agreement per task and question.
+    
+    Each plot:
+      - X-axis: question
+      - Y-axis: task_id
+      - Color: agreement (1 = agree, 0 = disagree)
+    
+    Saves one PNG file per question_source.
+    """
+    # Ensure needed columns
+    required_cols = {"task_id", "question", "question_source", "agreement"}
+    if not required_cols.issubset(df.columns):
+        raise ValueError(f"Missing columns: {required_cols - set(df.columns)}")
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Iterate over question sources (e.g., groundtruth, llm)
+    for source, subdf in df.groupby("question_source"):
+        subdf = subdf.copy()
+        subdf["task_id"] = subdf["task_id"].astype(str)
+
+        p = (
+            ggplot(subdf, aes(x="question", y="task_id", fill="factor(agreement)"))
+            + geom_tile(color="white")
+            + scale_fill_manual(
+                values={"1": "#43aa8b", "0": "#f94144"},
+                name="Agreement",
+                labels=["Disagree", "Agree"]
+            )
+            + labs(
+                title=f"Agreement Heatmap — Question Source: {source}",
+                x="Question",
+                y="Task ID"
+            )
+            + theme_bw()
+            + theme(
+                axis_text_x=element_text(rotation=90, size=6),
+                axis_text_y=element_text(size=7),
+                figure_size=(10, 6),
+                legend_title=element_text(size=9),
+                legend_text=element_text(size=8),
+                plot_title=element_text(size=12, weight="bold")
+            )
+        )
+
+        plot_path = os.path.join(output_dir, f"agreement_heatmap_{source}.png")
+        p.save(plot_path, dpi=300)
+        print(f"Saved heatmap for '{source}' to {plot_path}")
+
+    print("\n✅ All heatmaps saved.")
 
 
 
@@ -529,30 +686,39 @@ def compute_agreement_summary(
     base_dir: str,
     report_type: str = "llm(gpt-4o)",
 ) -> pd.DataFrame:
-    # --- Load benchmark ---
+
+    # -------- Load and preprocess benchmark --------
     bench = pd.read_csv(benchmark_path)
 
-    # --- Clean Task_ID ---
+    # Clean Task_ID
     bench["Task_ID"] = (
         bench["ID"]
         .astype(str)
         .str.replace('.', '', regex=False)
-        .str.replace(r'0+$', '', regex=True)
-        .str.rstrip('.')
+        .str.replace(r"0+$", "", regex=True)
+        .str.rstrip(".")
         .astype(int)
     )
 
-    # --- Extract Year_Published ---
-    if "Date Published" in bench.columns:
-        bench["Year_Published"] = pd.to_datetime(
-            bench["Date Published"], errors="coerce"
-        ).dt.year
-    else:
+    # Extract year
+    if "Date Published" not in bench.columns:
         raise KeyError("'Date Published' column not found in benchmark file.")
+    bench["Year_Published"] = pd.to_datetime(
+        bench["Date Published"], errors="coerce"
+    ).dt.year
 
-    diff_col = "Difficulty: 1 (Easy) - 2 (Med) - 3 (Hard)"
+    # -------- Variables to merge + aggregate --------
+    benchmark_vars = {
+        "Number of Steps": "Number of Steps",
+        "Difficulty: 1 (Easy) - 2 (Med) - 3 (Hard)": "Difficulty (Steps)",
+        "Difficulty-Text: 1 (Easy) - 2 (Med) - 3 (Hard)": "Difficulty (Text)",
+        "Year_Published": "Year_Published"
 
-    # --- Build agreement path ---
+    }
+    # Keep only those columns that actually exist in the benchmark
+    existing_vars = {k: v for k, v in benchmark_vars.items() if k in bench.columns}
+
+    # -------- Load agreement data --------
     agreement_path = (
         Path(base_dir)
         / "experiments"
@@ -561,53 +727,61 @@ def compute_agreement_summary(
         / f"groundtruth_vs_{report_type}"
         / "agreement_report_level_by_source.csv"
     )
-
-    # --- Load agreement data ---
     agreement = pd.read_csv(agreement_path)
 
-    # --- Merge benchmark info ---
+    # Merge benchmark fields
     agreement = agreement.merge(
-        bench[["Task_ID", diff_col, "Year_Published"]],
+        bench[["Task_ID"] + list(existing_vars.keys())],
         how="left",
         on="Task_ID"
     )
 
-    # --- Helper: aggregate by variable ---
-    def aggregate_variable(var_name: str) -> pd.DataFrame:
-        by_source = (
-            agreement.groupby(["Question_Source", var_name], as_index=False)["Agreement_Percentage"]
-            .mean()
-            .rename(columns={"Agreement_Percentage": "Mean_Agreement_Percentage", var_name: "Value"})
-        )
-        by_source["Variable"] = var_name
+    # -------- Helper function for aggregation --------
+    def aggregate(var):
+        """
+        Aggregates by variable and question source.
+        Returns: DataFrame with columns:
+        Question_Source | Variable | Value | Mean_Agreement_Percentage
+        """
+        var_label = existing_vars[var]
 
-        overall = (
-            agreement.groupby([var_name], as_index=False)["Agreement_Percentage"]
+        # By-source aggregation
+        by_source = (
+            agreement.groupby(["Question_Source", var], as_index=False)["Agreement_Percentage"]
             .mean()
-            .rename(columns={"Agreement_Percentage": "Mean_Agreement_Percentage", var_name: "Value"})
+            .rename(columns={
+                "Agreement_Percentage": "Mean_Agreement_Percentage",
+                var: "Value"
+            })
         )
-        overall["Variable"] = var_name
+        by_source["Variable"] = var_label
+
+        # Overall (across all sources)
+        overall = (
+            agreement.groupby([var], as_index=False)["Agreement_Percentage"]
+            .mean()
+            .rename(columns={
+                "Agreement_Percentage": "Mean_Agreement_Percentage",
+                var: "Value"
+            })
+        )
+        overall["Variable"] = var_label
         overall["Question_Source"] = "Overall"
 
         return pd.concat([by_source, overall], ignore_index=True)
 
-    df_diff = aggregate_variable(diff_col)
-    df_year = aggregate_variable("Year_Published")
+    # -------- Aggregate all variables dynamically --------
+    summaries = [aggregate(var) for var in existing_vars]
 
-    # --- Combine ---
-    result = (
-        pd.concat([df_diff, df_year], ignore_index=True)
-        .loc[:, ["Question_Source", "Variable", "Value", "Mean_Agreement_Percentage"]]
-        .sort_values(["Question_Source", "Variable", "Value"])
-        .reset_index(drop=True)
-    )
+    result = pd.concat(summaries, ignore_index=True)
 
-    # --- Add report type and sort ---
+    # -------- Final formatting --------
     result["Report_Type"] = report_type
+
     result = result[
         ["Report_Type", "Question_Source", "Variable", "Value", "Mean_Agreement_Percentage"]
     ].sort_values(
-        by=["Report_Type", "Variable", "Question_Source", "Value"]
+        ["Report_Type", "Variable", "Question_Source", "Value"]
     ).reset_index(drop=True)
 
     return result

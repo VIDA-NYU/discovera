@@ -27,7 +27,11 @@ COLUMN_MAP = {
     "discovera": "Discovera (gpt-4o)",
     "llm": "LLM (gpt-4o)",
     "groundtruth": "Ground Truth",
-    "biomni": "Biomni"
+    "biomni": "Biomni",
+    "llm(o4-mini)": "LLM (o4-mini)",
+    "biomni(11-05-25)": "Biomni (11-05-25)",
+
+
 }
 
 

@@ -422,8 +422,9 @@ def respond_question(
 
         else:
             idx = str(q["task_id"])
-            print(f"[INFO] Accessing report text for question from report {idx} ...\n")
             report_text = reports_dict.get(idx)
+            print(f"[INFO] Accessing report text for question from report {idx} ...\n {report_text[:100]}...\n")
+            
             print(f"[INFO] Answering questions with access to report text ...\n")            
             prompt = answer_prompt_template(q["question"], q["choices"], report=report_text)
             # print(prompt)
