@@ -20,23 +20,13 @@ import pandas as pd
 import re
 
 
-# ----------------------------------------------------------------------
-# Column mapping for benchmark dataset (adjust as needed)
-# ----------------------------------------------------------------------
-COLUMN_MAP = {
-    "discovera": "Discovera (gpt-4o)",
-    "llm": "LLM (gpt-4o)",
-    "groundtruth": "Ground Truth",
-    "biomni": "Biomni",
-    "llm(o4-mini)": "LLM (o4-mini)",
-    "biomni(11-05-25)": "Biomni (11-05-25)",
 
 
-}
-
-
-def analyze_benchmark_disaggregated(df, col_map, difficulty_col,
-                                    prompt_col="Prompt", context_col="Context/Background"):
+def analyze_benchmark_disaggregated(
+    df,
+    prompt_col="Prompt", 
+    context_col="Context/Background"
+    ):
     """
     Analyze benchmark dataset and provide both summary stats and disaggregated counts.
     Computes average word count for prompt and context columns.
@@ -63,7 +53,13 @@ def analyze_benchmark_disaggregated(df, col_map, difficulty_col,
 
     unique_journals = df["Journal"].nunique() if "Journal" in df.columns else None
     unique_species = df["Species"].nunique() if "Species" in df.columns else None
-    unique_difficulties = df[difficulty_col].nunique() if difficulty_col in df.columns else None
+    difficulty_steps = "Difficulty: 1 (Easy) - 2 (Med) - 3 (Hard)"
+    difficulty_text = "Difficulty-Text: 1 (Easy) - 2 (Med) - 3 (Hard)"
+    steps = "Number of Steps"
+    unique_difficulties_steps = df[difficulty_steps].nunique() if difficulty_steps in df.columns else None
+    unique_difficulties_text = df[difficulty_text].nunique() if difficulty_text in df.columns else None
+    unique_steps = df[steps].nunique() if steps in df.columns else None
+
     unique_how_chosen = df["How Chosen"].nunique() if "How Chosen" in df.columns else None
 
     # --- Compute average word counts ---
@@ -85,7 +81,9 @@ def analyze_benchmark_disaggregated(df, col_map, difficulty_col,
             "Most Common Year",
             "Unique Journals",
             "Unique Species",
-            "Unique Difficulty Levels",
+            "Unique Difficulty Levels Based on Steps",
+            "Unique Difficulty Levels Based on Text",
+            "Unique Number of Steps",
             "Unique How it was Chosen",
             f"Avg Word Count - {prompt_col}",
             f"Avg Word Count - {context_col}"
@@ -97,7 +95,9 @@ def analyze_benchmark_disaggregated(df, col_map, difficulty_col,
             most_common_year,
             unique_journals,
             unique_species,
-            unique_difficulties,
+            unique_difficulties_steps,
+            unique_difficulties_text,
+            unique_steps,
             unique_how_chosen,
             round(avg_prompt_wc, 2) if avg_prompt_wc else None,
             round(avg_context_wc, 2) if avg_context_wc else None
@@ -119,7 +119,9 @@ def analyze_benchmark_disaggregated(df, col_map, difficulty_col,
     add_disagg("Year Published", "Year Published", sort_index=True)
     add_disagg("Journal", "Journal")
     add_disagg("Species", "Species")
-    add_disagg(difficulty_col, "Difficulty", sort_index=True)
+    add_disagg(difficulty_steps, "Difficulty (Steps)", sort_index=True)
+    add_disagg(difficulty_text, "Difficulty (Text)", sort_index=True)
+    add_disagg(steps, "Number of Steps", sort_index=True)
     add_disagg("How Chosen", "How Task Was Chosen?", sort_index=True)
 
     # Combine all into one DataFrame
@@ -135,7 +137,6 @@ def analyze_benchmark_disaggregated(df, col_map, difficulty_col,
 def parse_args():
     parser = argparse.ArgumentParser(description="Analyze benchmark dataset and compute summary stats.")
     parser.add_argument("--benchmark", type=str, required=True, help="Path to benchmark CSV file.")
-    parser.add_argument("--difficulty", type=str, required=True, help="Name of difficulty column.")
     parser.add_argument("--prompt", type=str, default="Prompt", help="Prompt column name.")
     parser.add_argument("--context", type=str, default="Context/Background", help="Context column name.")
     parser.add_argument(
@@ -175,8 +176,6 @@ def main():
 
     stats_summary, disaggregated_df = analyze_benchmark_disaggregated(
         df,
-        COLUMN_MAP,
-        args.difficulty,
         prompt_col=args.prompt,
         context_col=args.context
     )

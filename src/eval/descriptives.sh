@@ -4,14 +4,12 @@
 # --- Configurable paths ---
 BENCHMARK_PATH="../../data/benchmark/benchmark.csv"
 OUTPUT_DIR="../../output/"
-DIFFICULTY_COL="Difficulty: 1 (Easy) - 2 (Med) - 3 (Hard)"
 PROMPT_COL="Prompt"
 CONTEXT_COL="Context/Background"
 
 # --- Run Python analysis ---
 python3 descriptives.py \
   --benchmark "$BENCHMARK_PATH" \
-  --difficulty "$DIFFICULTY_COL" \
   --prompt "$PROMPT_COL" \
   --context "$CONTEXT_COL" \
   --output_dir "$OUTPUT_DIR"

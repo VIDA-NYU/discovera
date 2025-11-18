@@ -26,21 +26,7 @@ module_dir = "../../"
 sys.path.append(os.path.abspath(module_dir))
 
 from src.eval.prompting import load_reports, respond_question  # noqa: E402
-
-
-# Mapping JSON keywords to benchmark columns
-REPORT_TO_COLUMN = {
-    "discovera(gpt-4o)": "Discovera (gpt-4o)",
-    "llm(gpt-4o)": "LLM (gpt-4o)",
-    "groundtruth": "Ground Truth",
-    "discovera(o4-mini)": "Discovera (o4-mini)",
-    #"biomni": "Biomni",
-    "biomni(11-05-25)": "Biomni (11-05-25)",
-    "llm(o4-mini)": "LLM (o4-mini)",
-    "biomni(o4-mini)": "Biomni (o4-mini)"
-
-    # Add more mappings here if needed
-}
+from src.eval.mappings import REPORT_TO_COLUMN  # new import
 
 
 def parse_args():
@@ -135,10 +121,6 @@ def main():
 
     # Efficiently load questions from base and compare JSONs
     report_keywords = [args.base, args.compare]
-    # uncomment above and remove this soon, right now we are only checking how much of the ground truth questions are answered
-    # but to follow the whole methodology we need both base and compare questions
-    #report_keywords = [args.base]
-    #report_keywords = [args.compare]
 
     all_questions = load_questions_from_reports(questions_folder, report_keywords)
     pair_folder = answers_folder / f"{args.base}_vs_{args.compare}"
