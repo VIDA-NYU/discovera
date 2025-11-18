@@ -15,14 +15,14 @@ set -euo pipefail
 # -----------------------------
 
 BENCHMARK="../../data/benchmark/benchmark.csv"
-EXPERIMENT="gpt-5_20251112_011802"
+EXPERIMENT="gpt-5_20251117_214245"
 BASE_DIR="../../data"
 REPORT_TYPES=(
   #"llm(o4-mini)" 
   #"discovera(gpt-4o)" 
   #"biomni(11-05-25)"
-  "discovera(o4-mini)"
-  #"biomni(o4-mini)"
+  #"discovera(o4-mini)"
+  "biomni(o4-mini)"
   #"biomni(claude-3.5-haiku)"
   )
 

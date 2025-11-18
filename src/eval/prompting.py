@@ -83,9 +83,10 @@ def load_reports(
             if not report_text or not report_text.strip():
                 continue
 
-            task_idx = raw_task_id.replace(".", "")
+            #task_idx = raw_task_id.replace(".", "")
             source = source.lower().replace(" ", "")
-            reports.append((task_idx, report_text, report_prompt, source))
+            #reports.append((task_idx, report_text, report_prompt, source))
+            reports.append((raw_task_id, report_text, report_prompt, source))
 
     return reports
 
@@ -421,7 +422,13 @@ def respond_question(
             prompt = answer_prompt_template(q["question"], q["choices"], report=None)
 
         else:
-            idx = str(q["task_id"])
+            task_id = q["task_id"]
+
+            # Convert to string intelligently
+            if isinstance(task_id, float) and task_id.is_integer():
+                idx = str(int(task_id))
+            else:
+                idx = str(task_id)
             report_text = reports_dict.get(idx)
             print(f"[INFO] Accessing report text for question from report {idx} ...\n {report_text[:100]}...\n")
             
@@ -432,7 +439,7 @@ def respond_question(
         try:
             response = llm.run(prompt, json_output=True)
             results.append({
-                "task_id": q["task_id"],
+                "task_id": idx,
                 "question": q["question"],
                 "question_source": q["question_source"],
                 "choices": q["choices"],
@@ -444,7 +451,7 @@ def respond_question(
         except Exception as e:
             print(f"[Error] report {q['task_id']} - {e}")
             results.append({
-                "task_id": q["task_id"],
+                "task_id": idx,
                 "question": q["question"],
                 "question_source": q["question_source"],
                 "choices": q["choices"],

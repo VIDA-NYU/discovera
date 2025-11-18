@@ -4,7 +4,7 @@ set -euo pipefail
 # -----------------------------
 # Parameters
 # -----------------------------
-EXPERIMENT="gpt-5_20251112_011802"
+EXPERIMENT="gpt-5_20251117_214245"
 BENCHMARK="../../data/benchmark/benchmark.csv"
 # Models/providers you want to test
 MODELS=("gpt-5")
@@ -15,10 +15,8 @@ COMPARES=(
     #"discovera(gpt-4o)" 
     #"llm(gpt-4o)"
     #"llm(o4-mini)"
-    "discovera(o4-mini)"
-    #"biomni"
-    #"biomni(11-05-25)"
-    #"biomni(o4-mini)"
+    #"discovera(o4-mini)"
+    "biomni(o4-mini)"
     )
 
 # -----------------------------
