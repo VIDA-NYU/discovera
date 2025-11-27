@@ -202,7 +202,7 @@ def load_benchmark_breakdown(csv_path: str) -> List[Dict[str, Any]]:
             prompt = row.get("Fine-grained Prompt", "").strip()
 
             # Skip rows without keypoint data
-            if not keypoint_num or not ground_truth or not prompt:
+            if not keypoint_num or not ground_truth:
                 continue
 
             try:
@@ -239,7 +239,6 @@ def batched_keypoints_template(
         List of keypoint dictionaries, each containing:
         - "keypoint_num": int
         - "keypoint": str
-        - "fine_grained_prompt": str
 
     Returns
     -------
@@ -299,7 +298,9 @@ For each keypoint:
    C. …
    D. …
 
-7. Correct answers must be randomly distributed among A–D. Avoid positional bias.
+7. Correct answers MUST be randomly distributed among A–D with NO patterns:
+   - Avoid consecutive identical answers (e.g., don't put 3+ same answers in a row).
+   - Ensure roughly equal distribution across all four choices (A, B, C, D).
 
 8. You may include "None of the above" sparingly (max 10% of questions) —
    and it may be correct or incorrect.
@@ -411,7 +412,7 @@ def answer_prompt_template(question: str, choices: List[str], report: str) -> st
 
         Respond ONLY in this JSON format:
         {{
-          "answer": "<A/B/C/D/E",
+          "answer": "<A/B/C/D/E>",
           "confidence": <float between 0 and 1>
         }}
         """.strip()
@@ -610,7 +611,6 @@ def generate_questions_from_breakdown(
             - "choices" (List[str]): Answer choices for the question
             - "answer" (str): The correct answer (A, B, C, or D)
             - "ground_truth_keypoint" (str): The ground truth keypoint text
-            - "fine_grained_prompt" (str): The original fine-grained prompt
 
     Raises:
         FileNotFoundError: If the CSV file does not exist.
@@ -638,7 +638,6 @@ def generate_questions_from_breakdown(
             {
                 "keypoint_num": task["keypoint_num"],
                 "keypoint": task["ground_truth_keypoint"],
-                "fine_grained_prompt": task.get("fine_grained_prompt", ""),
             }
         )
 
@@ -698,7 +697,6 @@ def generate_questions_from_breakdown(
                     "choices": q.get("choices", []),
                     "answer": q.get("answer", ""),
                     "ground_truth_keypoint": kp_data.get("keypoint", ""),
-                    "fine_grained_prompt": kp_data.get("fine_grained_prompt", ""),
                 }
                 task_questions.append(question_dict)
                 all_questions.append(question_dict)
@@ -1000,6 +998,219 @@ def respond_question(
             print(f"[INFO] Saved to {file_path}")
 
 
+def respond_questions_with_finegrained_reports(
+    questions_dir: str,
+    reports_dir: str,
+    answers_dir: str,
+    provider: str = "openai",
+    model: str = "gpt-4o",
+    task_ids: Optional[List[str]] = None,
+) -> None:
+    """
+    Answer questions using fine-grained reports stored as individual JSON files.
+
+    This function reads questions from the questions directory, matches them with
+    fine-grained report files (task_{task_id}_{keypoint_id}.json), and answers
+    each question using the corresponding report's output_text.
+
+    Args:
+        questions_dir (str):
+            Directory containing question JSON files, organized by task_id.
+            Expected structure: questions_dir/{task_id}/*.json
+
+        reports_dir (str):
+            Directory containing fine-grained report JSON files.
+            Expected filename format: task_{task_id}_{keypoint_id}.json
+            Each file should contain an "output_text" field with the report.
+
+        answers_dir (str):
+            Directory to save answered questions.
+            Output structure: answers_dir/{task_id}/ans{num}_rsfinegrained_{provider}_{model}.json
+
+        provider (str, optional):
+            The LLM service provider to use (e.g., "openai", "anthropic").
+            Defaults to "openai".
+
+        model (str, optional):
+            The model name to use for answering questions.
+            Defaults to "gpt-4o".
+
+        task_ids (Optional[List[str]], optional):
+            If provided, only process questions for tasks with IDs in this list.
+            Defaults to None (process all tasks found in questions_dir).
+
+    Returns:
+        None: Results are saved to files in answers_dir.
+
+    Example:
+        >>> respond_questions_with_finegrained_reports(
+        ...     questions_dir="output/questions_new",
+        ...     reports_dir="outputs/Discovera",
+        ...     answers_dir="output/answers_finegrained",
+        ...     provider="openai",
+        ...     model="gpt-5-nano"
+        ... )
+    """
+    llm = get_llm(provider, model, api_key=load_openai_key())
+
+    # Determine which tasks to process
+    if task_ids is None:
+        task_dirs = [
+            d
+            for d in os.listdir(questions_dir)
+            if os.path.isdir(os.path.join(questions_dir, d))
+        ]
+    else:
+        task_dirs = task_ids
+
+    print(f"[INFO] Processing {len(task_dirs)} tasks from {questions_dir}...")
+
+    for task_id in tqdm(task_dirs, desc="Processing Tasks"):
+        task_questions_dir = os.path.join(questions_dir, task_id)
+        if not os.path.isdir(task_questions_dir):
+            print(f"[WARNING] Questions directory not found: {task_questions_dir}")
+            continue
+
+        # Find all JSON question files in this task directory
+        question_files = [
+            f for f in os.listdir(task_questions_dir) if f.endswith(".json")
+        ]
+
+        if not question_files:
+            print(f"[WARNING] No question files found in {task_questions_dir}")
+            continue
+
+        # Process each question file
+        for question_file in question_files:
+            question_path = os.path.join(task_questions_dir, question_file)
+
+            # Load questions
+            try:
+                with open(question_path, "r", encoding="utf-8") as f:
+                    questions = json.load(f)
+            except Exception as e:
+                print(f"[ERROR] Failed to load {question_path}: {e}")
+                continue
+
+            if not isinstance(questions, list) or not questions:
+                print(f"[WARNING] Invalid question format in {question_path}")
+                continue
+
+            # Answer questions using fine-grained reports
+            results = []
+            print(
+                f"[INFO] Answering {len(questions)} questions for task {task_id} "
+                f"using fine-grained reports..."
+            )
+
+            for q in tqdm(questions, desc=f"Task {task_id}"):
+                question_id = str(q.get("question_id", ""))
+                if not question_id:
+                    print(
+                        f"[WARNING] Missing question_id in question from {question_path}"
+                    )
+                    continue
+
+                # Construct fine-grained report filename
+                # Format: task_{task_id}_{keypoint_id}.json
+                report_filename = f"task_{task_id}_{question_id}.json"
+                report_path = os.path.join(reports_dir, report_filename)
+
+                # Load fine-grained report
+                report_text = ""
+                if os.path.exists(report_path):
+                    try:
+                        with open(report_path, "r", encoding="utf-8") as f:
+                            report_data = json.load(f)
+                        report_text = report_data.get("output_text", "").strip()
+                    except Exception as e:
+                        print(
+                            f"[WARNING] Failed to load report {report_path}: {e}"
+                        )
+                else:
+                    print(
+                        f"[WARNING] Fine-grained report not found: {report_path}"
+                    )
+
+                # Answer question using the report
+                prompt = answer_prompt_template(
+                    q.get("question", ""), q.get("choices", []), report=report_text
+                )
+
+                try:
+                    response = llm.run(prompt, json_output=True)
+                    results.append(
+                        {
+                            "task_id": q.get("task_id", task_id),
+                            "question_id": question_id,
+                            "question": q.get("question", ""),
+                            "question_source": q.get(
+                                "question_source", "groundtruth"
+                            ),
+                            "choices": q.get("choices", []),
+                            "answer": q.get("answer", ""),
+                            "prediction": response.get("answer", None),
+                            "confidence": response.get("confidence", None),
+                            "report_source": "finegrained",
+                            "report_file": report_filename,
+                        }
+                    )
+                except Exception as e:
+                    print(
+                        f"[ERROR] Failed to answer question for task {task_id}, "
+                        f"question_id {question_id}: {e}"
+                    )
+                    results.append(
+                        {
+                            "task_id": q.get("task_id", task_id),
+                            "question_id": question_id,
+                            "question": q.get("question", ""),
+                            "question_source": q.get(
+                                "question_source", "groundtruth"
+                            ),
+                            "choices": q.get("choices", []),
+                            "answer": q.get("answer", ""),
+                            "prediction": None,
+                            "confidence": None,
+                            "report_source": "finegrained",
+                            "report_file": report_filename,
+                            "error": str(e),
+                        }
+                    )
+
+            # Save results
+            if results:
+                task_answers_dir = os.path.join(answers_dir, task_id)
+                os.makedirs(task_answers_dir, exist_ok=True)
+
+                # Extract number of questions from question filename
+                # e.g., "qs12_rsgroundtruth_openai_gpt_5_nano.json" -> "qs12"
+                qs_match = question_file.split("_")[0]  # "qs12"
+                num_questions = (
+                    qs_match.replace("qs", "")
+                    if qs_match.startswith("qs")
+                    else str(len(results))
+                )
+
+                # Format model name
+                model_name = model.replace("/", "-").replace("-", "_")
+
+                # Create answer filename
+                answer_filename = (
+                    f"ans{num_questions}_rsfinegrained_{provider}_{model_name}.json"
+                )
+                answer_path = os.path.join(task_answers_dir, answer_filename)
+
+                try:
+                    with open(answer_path, "w", encoding="utf-8") as f:
+                        json.dump(results, f, indent=2, ensure_ascii=False)
+                    print(f"[INFO] Saved {len(results)} answers to {answer_path}")
+                except Exception as e:
+                    print(f"[ERROR] Failed to save answers to {answer_path}: {e}")
+
+    print("[INFO] Completed processing fine-grained reports.")
+
+
 def generate_score_comparison_table(
     answers_dir: str, task_ids: Optional[List[str]] = None
 ) -> pd.DataFrame:
@@ -1023,6 +1234,8 @@ def generate_score_comparison_table(
             - correct: Number of correct answers
             - accuracy: Accuracy score (0-1)
             - avg_confidence: Average confidencse score
+            - weighted_score: Weighted score calculated as (accuracy * total_questions) /
+              sum(total_questions) for each report_source/provider/model group
     """
     all_results = []
 
@@ -1072,7 +1285,7 @@ def generate_score_comparison_table(
                         if i + 1 < len(parts):
                             provider = parts[i + 1]
                         if i + 2 < len(parts):
-                            model = "_".join(parts[i + 2 :])  # Join remaining parts
+                            model = "_".join(parts[i + 2:])  # Join remaining parts
                         break
 
                 if not report_source or not provider or not model:
@@ -1146,3 +1359,351 @@ def generate_score_comparison_table(
 
     print(f"[INFO] Generated comparison table with {len(df)} rows")
     return df
+
+
+def extract_keypoints_prompt(ground_truth_text: str) -> str:
+    """
+    Generate prompt for extracting keypoints from ground truth text.
+
+    Args:
+        ground_truth_text: The ground truth text to extract keypoints from.
+
+    Returns:
+        Formatted prompt string.
+    """
+    return f"""
+You are analyzing a biomedical ground truth text. Extract the key scientific claims or findings as distinct keypoints.
+
+--- BEGIN GROUND TRUTH TEXT ---
+{ground_truth_text}
+--- END GROUND TRUTH TEXT ---
+
+Instructions:
+1. Break down the text into distinct, atomic keypoints (claims/findings).
+2. Each keypoint should be a single, clear scientific statement.
+3. Preserve the exact meaning and scientific accuracy.
+4. Number each keypoint sequentially (1, 2, 3, ...).
+5. Each keypoint should be self-contained and meaningful on its own.
+
+Output format (JSON):
+{{
+  "keypoints": [
+    "Keypoint 1 text here",
+    "Keypoint 2 text here",
+    ...
+  ]
+}}
+
+Generate the keypoints now:
+""".strip()
+
+
+def check_coverage_prompt(keypoint: str, report_text: str, report_name: str) -> str:
+    """
+    Generate prompt for checking if a keypoint is covered in a report.
+
+    Args:
+        keypoint: The keypoint to check.
+        report_text: The report text to check against.
+        report_name: Name of the report (e.g., "Discovera").
+
+    Returns:
+        Formatted prompt string.
+    """
+    return f"""
+You are evaluating whether a specific scientific keypoint is covered in a biomedical report.
+
+--- BEGIN KEYPOINT ---
+{keypoint}
+--- END KEYPOINT ---
+
+--- BEGIN {report_name} REPORT ---
+{report_text}
+--- END {report_name} REPORT ---
+
+Task:
+1. Determine if the keypoint is covered in the report (YES or NO).
+2. If YES, provide specific evidence/quotes from the report that support the keypoint.
+3. If NO, explain why it's not covered (missing information, contradicted, etc.).
+4. Be precise and cite exact text when possible.
+
+Output format (JSON):
+{{
+  "covered": "YES" or "NO",
+  "evidence": "Specific evidence from the report, including quotes if available. If NO, explain why not covered."
+}}
+
+Evaluate now:
+""".strip()
+
+
+def generate_keypoint_coverage_table(
+    csv_path: str,
+    task_id: str,
+    ground_truth_column: str = "Ground Truth",
+    report_columns: Optional[List[str]] = None,
+    task_id_column: str = "ID",
+    provider: str = "openai",
+    model: str = "gpt-4o",
+    output_path: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    Generate a detailed coverage table showing which keypoints from ground truth
+    are covered by each report.
+
+    This function:
+    1. Extracts keypoints from the ground truth text for a specific task
+    2. Checks coverage of each keypoint in each report column
+    3. Generates evidence/explanations for coverage decisions
+    4. Returns a formatted table
+
+    Args:
+        csv_path: Path to the CSV file containing ground truth and reports.
+        task_id: Task ID to process (e.g., "1", "2.1").
+        ground_truth_column: Column name containing ground truth text.
+                           Default is "Ground Truth".
+        report_columns: List of column names to check coverage against.
+            If None, will attempt to auto-detect report columns.
+                      Default is None.
+        task_id_column: Column name containing task IDs. Default is "ID".
+        provider: LLM provider (e.g., "openai"). Default is "openai".
+        model: LLM model name (e.g., "gpt-4o"). Default is "gpt-4o".
+        output_path: Optional path to save the results as JSON/CSV.
+                    Default is None.
+
+    Returns:
+        pd.DataFrame: Coverage table with columns:
+            - keypoint_num: Keypoint number (1, 2, 3, ...)
+            - keypoint: The keypoint text
+            - report_source: Name of the report column
+            - covered: "YES" or "NO"
+            - evidence: Evidence/explanation for coverage decision
+            - task_id: Task ID
+
+    Example:
+        >>> df = generate_keypoint_coverage_table(
+        ...     csv_path="benchmark.csv",
+        ...     task_id="1",
+        ...     report_columns=["Discovera (o4-mini)", "Biomni (o4-mini)"]
+        ... )
+        >>> print(df)
+    """
+    llm = get_llm(provider, model, api_key=load_openai_key())
+
+    # Load CSV data
+    print(f"[INFO] Loading data from {csv_path}...")
+    csv_data = {}
+    all_columns = []
+
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        reader.fieldnames = [h.strip() for h in reader.fieldnames]
+        all_columns = list(reader.fieldnames)
+
+        for row in reader:
+            raw_task_id = row.get(task_id_column, "").strip()
+            if raw_task_id:
+                csv_data[raw_task_id] = row
+
+    # Get task data
+    task_row = csv_data.get(task_id)
+    if not task_row:
+        raise ValueError(f"Task ID '{task_id}' not found in CSV")
+
+    # Get ground truth
+    ground_truth_text = task_row.get(ground_truth_column, "").strip()
+    if not ground_truth_text:
+        raise ValueError(
+            f"Ground truth text not found for task {task_id} "
+            f"in column '{ground_truth_column}'"
+        )
+
+    # Auto-detect report columns if not provided
+    if report_columns is None:
+        # Exclude common non-report columns
+        exclude_cols = {
+            task_id_column.lower(),
+            ground_truth_column.lower(),
+            "prompt",
+            "context",
+            "id",
+        }
+        report_columns = [
+            col
+            for col in all_columns
+            if col.lower() not in exclude_cols
+            and task_row.get(col, "").strip()  # Has content
+        ]
+        print(
+            f"[INFO] Auto-detected {len(report_columns)} report columns: "
+            f"{report_columns}"
+        )
+
+    if not report_columns:
+        raise ValueError("No report columns found or specified")
+
+    # Step 1: Extract keypoints from ground truth
+    print(f"[INFO] Extracting keypoints from ground truth for task {task_id}...")
+    extract_prompt = extract_keypoints_prompt(ground_truth_text)
+
+    try:
+        keypoints_response = llm.run(extract_prompt, json_output=True)
+        if isinstance(keypoints_response, dict):
+            keypoints = keypoints_response.get("keypoints", [])
+        elif isinstance(keypoints_response, list):
+            keypoints = keypoints_response
+        else:
+            raise ValueError(f"Unexpected keypoints format: {type(keypoints_response)}")
+    except Exception as e:
+        raise RuntimeError(f"Failed to extract keypoints: {e}")
+
+    if not keypoints:
+        raise ValueError("No keypoints extracted from ground truth")
+
+    print(f"[INFO] Extracted {len(keypoints)} keypoints")
+
+    # Step 2: Check coverage for each keypoint in each report
+    print(f"[INFO] Checking coverage in {len(report_columns)} reports...")
+    coverage_results = []
+
+    for keypoint_num, keypoint in enumerate(keypoints, start=1):
+        for report_column in report_columns:
+            report_text = task_row.get(report_column, "").strip()
+            if not report_text:
+                coverage_results.append(
+                    {
+                        "task_id": task_id,
+                        "keypoint_num": keypoint_num,
+                        "keypoint": keypoint,
+                        "report_source": report_column,
+                        "covered": "NO",
+                        "evidence": "Report column is empty or missing.",
+                    }
+                )
+                continue
+
+            # Generate source name
+            report_name = report_column.split("(")[0].strip()
+
+            # Check coverage
+            coverage_prompt = check_coverage_prompt(
+                keypoint, report_text, report_name
+            )
+
+            try:
+                coverage_response = llm.run(coverage_prompt, json_output=True)
+                if isinstance(coverage_response, dict):
+                    covered = coverage_response.get("covered", "NO").upper()
+                    evidence = coverage_response.get("evidence", "")
+                else:
+                    covered = "NO"
+                    evidence = f"Unexpected response format: {type(coverage_response)}"
+            except Exception as e:
+                print(
+                    f"[WARNING] Failed to check coverage for keypoint {keypoint_num} "
+                    f"in {report_column}: {e}"
+                )
+                covered = "NO"
+                evidence = f"Error during coverage check: {str(e)}"
+
+            coverage_results.append(
+                {
+                    "task_id": task_id,
+                    "keypoint_num": keypoint_num,
+                    "keypoint": keypoint,
+                    "report_source": report_column,
+                    "covered": covered,
+                    "evidence": evidence,
+                }
+            )
+
+    # Create DataFrame
+    df = pd.DataFrame(coverage_results)
+
+    # Sort by keypoint_num, then report_source
+    df = df.sort_values(
+        by=["keypoint_num", "report_source"], ascending=[True, True]
+    ).reset_index(drop=True)
+
+    print(f"[INFO] Generated coverage table with {len(df)} rows")
+
+    # Save if output_path is provided
+    if output_path:
+        output_dir = (
+            os.path.dirname(output_path) if os.path.dirname(output_path) else "."
+        )
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Determine base name without extension
+        base_name = output_path
+        if output_path.endswith((".csv", ".json")):
+            base_name = output_path.rsplit(".", 1)[0]
+
+        # Save as CSV
+        csv_output = f"{base_name}.csv"
+        df.to_csv(csv_output, index=False, encoding="utf-8")
+        print(f"[INFO] Saved CSV to {csv_output}")
+
+        # Save as JSON
+        json_output = f"{base_name}.json"
+        df.to_json(json_output, orient="records", indent=2, force_ascii=False)
+        print(f"[INFO] Saved JSON to {json_output}")
+
+        return df
+
+
+def format_coverage_table_markdown(
+    df: pd.DataFrame, report_source: Optional[str] = None
+) -> str:
+    """
+    Format coverage table DataFrame as a markdown table.
+
+    Args:
+        df: Coverage table DataFrame from generate_keypoint_coverage_table.
+        report_source: Optional filter to show only one report source.
+                      If None, shows all reports.
+
+    Returns:
+        Formatted markdown table string.
+
+    Example:
+        >>> df = generate_keypoint_coverage_table(...)
+        >>> markdown = format_coverage_table_markdown(df, report_source="Discovera")
+        >>> print(markdown)
+    """
+    # Filter by report_source if specified
+    if report_source:
+        df = df[df["report_source"] == report_source].copy()
+
+    if df.empty:
+        return "No data to display."
+
+    # Create markdown table
+    lines = []
+    lines.append("| # | Ground Truth Keypoint | Covered? | Why / Evidence |")
+    lines.append("| --- | --- | --- | --- |")
+
+    for _, row in df.iterrows():
+        keypoint_num = row["keypoint_num"]
+        keypoint = row["keypoint"]
+        covered = row["covered"]
+        evidence = row["evidence"]
+
+        # Truncate long keypoints/evidence for display
+        max_keypoint_len = 100
+        max_evidence_len = 200
+
+        if len(keypoint) > max_keypoint_len:
+            keypoint = keypoint[:max_keypoint_len] + "..."
+        if len(evidence) > max_evidence_len:
+            evidence = evidence[:max_evidence_len] + "..."
+
+        # Escape pipe characters in markdown
+        keypoint = keypoint.replace("|", "\\|")
+        evidence = evidence.replace("|", "\\|")
+
+        lines.append(
+            f"| **{keypoint_num}** | {keypoint} | **{covered}** | {evidence} |"
+        )
+
+    return "\n".join(lines)
