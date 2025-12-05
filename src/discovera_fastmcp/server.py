@@ -672,7 +672,7 @@ def create_server():
                 kept_cols = [gene_col] + [
                     s for s in sample_order if s in raw_counts_df.columns
                 ]
-                raw_counts_df = raw_counts_df[kept_cols]
+                raw_counts_df = raw_counts_df[kept_cols].copy()
             else:
                 # Naive inference: take token before '_' as group label
                 records = []
@@ -684,7 +684,7 @@ def create_server():
                 sample_meta_df = pd.DataFrame.from_records(records)
                 # Keep all sample columns and preserve their original order
                 kept_cols = [gene_col] + [c for c in sample_cols]
-                raw_counts_df = raw_counts_df[kept_cols]
+                raw_counts_df = raw_counts_df[kept_cols].copy()
 
             # start sending heartbeat
             heartbeat_task = start_keepalive(ctx, 5.0)
@@ -944,7 +944,7 @@ def create_server():
                 kept_cols = [gene_col] + [
                     s for s in sample_order if s in raw_counts_df.columns
                 ]
-                raw_counts_df = raw_counts_df[kept_cols]
+                raw_counts_df = raw_counts_df[kept_cols].copy()
             else:
                 # Naive inference: take token before '_' as group label
                 records = []
@@ -956,7 +956,7 @@ def create_server():
                 sample_meta_df = pd.DataFrame.from_records(records)
                 # Keep all sample columns and preserve their original order
                 kept_cols = [gene_col] + [c for c in sample_cols]
-                raw_counts_df = raw_counts_df[kept_cols]
+                raw_counts_df = raw_counts_df[kept_cols].copy()
 
             # start sending heartbeat
             heartbeat_task = start_keepalive(ctx, 5.0)
@@ -984,11 +984,12 @@ def create_server():
 
             # Filter significant genes by padj < FDR threshold (default 0.2)
             thr = params.fdr_threshold if params.fdr_threshold is not None else 0.2
-            sig_df = de_results.copy()
-            if "padj" not in sig_df.columns:
+            if "padj" not in de_results.columns:
                 raise ValueError("DESeq2 results missing 'padj' column")
-            sig_df = sig_df[sig_df["padj"].notna() & (sig_df["padj"] < float(thr))]
-            sig_df = sig_df[["GeneID"]].dropna()
+            sig_df = de_results[
+                de_results["padj"].notna() & (de_results["padj"] < float(thr))
+            ].copy()
+            sig_df = sig_df[["GeneID"]].dropna().copy()
 
             if sig_df.empty:
                 logger.info(
