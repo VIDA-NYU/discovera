@@ -83,9 +83,9 @@ def load_reports(
             if not report_text or not report_text.strip():
                 continue
 
-            #task_idx = raw_task_id.replace(".", "")
+            # task_idx = raw_task_id.replace(".", "")
             source = source.lower().replace(" ", "")
-            #reports.append((task_idx, report_text, report_prompt, source))
+            # reports.append((task_idx, report_text, report_prompt, source))
             reports.append((raw_task_id, report_text, report_prompt, source))
 
     return reports
@@ -217,6 +217,66 @@ def load_benchmark_breakdown(csv_path: str) -> List[Dict[str, Any]]:
                     "keypoint_num": keypoint_num,
                     "ground_truth_keypoint": ground_truth,
                     "fine_grained_prompt": prompt,
+                }
+            )
+
+    return tasks
+
+
+def load_benchmark_breakdown_json(json_path: str) -> List[Dict[str, Any]]:
+    """
+    Load benchmark breakdown from JSON format.
+
+    Parameters
+    ----------
+    json_path : str
+        Path to the benchmark breakdown JSON file.
+
+    Returns
+    -------
+    List[Dict[str, Any]]
+        A list of dictionaries, each containing:
+        - "task_id": str - Task ID
+        - "context": str - Context text
+        - "keypoint_num": int - Keypoint number (from insight "id")
+        - "ground_truth_keypoint": str - Insight text
+        - "fine_grained_prompt": str - Fine-grained prompt/question (if available)
+    """
+    tasks = []
+
+    with open(json_path, "r", encoding="utf-8") as f:
+        json_data = json.load(f)
+
+    for task_id, task_data in json_data.items():
+        context = task_data.get("context", "").strip()
+        insights = task_data.get("insights", [])
+
+        if not context or not insights:
+            continue
+
+        for insight in insights:
+            insight_id = insight.get("id")
+            insight_text = insight.get("insight", "").strip()
+            fine_grained_prompt = insight.get("fine-grained prompt", "").strip()
+
+            if not insight_text:
+                continue
+
+            try:
+                keypoint_num = int(insight_id) if insight_id is not None else None
+            except (ValueError, TypeError):
+                continue
+
+            if keypoint_num is None:
+                continue
+
+            tasks.append(
+                {
+                    "task_id": task_id,
+                    "context": context,
+                    "keypoint_num": keypoint_num,
+                    "ground_truth_keypoint": insight_text,
+                    "fine_grained_prompt": fine_grained_prompt,
                 }
             )
 
@@ -566,24 +626,535 @@ def generate_questions(
     return all_questions
 
 
-def generate_questions_from_breakdown(
+def breakdown_template(report: str) -> str:
+    """
+    Template for generating keypoints from a report.
+
+    Parameters
+    ----------
+    report : str
+        The report text to break down into keypoints.
+
+    Returns
+    -------
+    str
+        Formatted prompt for LLM.
+    """
+    return f"""
+You are given a biomedical report. Your task is to generate a set of mechanistic key points that capture fine-grained causal or functional insights from the report.
+Instructions:
+- Produce no more than 12 mechanistic keypoints.
+- Do not include any specific counts, percentages, fold-changes, or sample numbers even if they appear in the report.
+- Focus on core mechanistic findings, not general observations.
+- Each keypoint must be concise, fine-grained, and biologically meaningful.
+
+--- BEGIN REPORT ---
+{report}
+--- END REPORT ---
+
+Output format (strict JSON):
+[
+  {{
+    "keypoint_num": 1,
+    "keypoint": "<concise statement of the insight>"
+  }},
+  {{
+    "keypoint_num": 2,
+    "keypoint": "<concise statement of the insight>"
+  }}
+]
+""".strip()
+
+
+def fine_grained_prompt_template(keypoint: str, context: str, prompt: str) -> str:
+    """
+    Template for generating fine-grained prompts from keypoints.
+
+    Parameters
+    ----------
+    keypoint : str
+        The keypoint to generate a prompt for.
+    context : str
+        The context/background information for the task.
+    prompt : str
+        The original prompt/question that the report answers.
+
+    Returns
+    -------
+    str
+        Formatted prompt for LLM.
+    """
+    return f"""
+You are tasked with generating a fine-grained prompt for a functional genomic benchmark.
+
+I will provide you a keypoint, the context, and the original prompt. Please generate a fine-grained prompt for the keypoint.
+
+--- BEGIN CONTEXT ---
+{context}
+--- END CONTEXT ---
+
+--- BEGIN ORIGINAL PROMPT ---
+{prompt}
+--- END ORIGINAL PROMPT ---
+
+--- BEGIN KEYPOINT ---
+{keypoint}
+--- END KEYPOINT ---
+
+Guidelines:
+- Avoid asking leading questions. If the keypoint is not explicitly stated in the context or original prompt, design a prompt that could guide someone to arrive at that keypoint through reasoning.
+- The prompt shouldn't contain many specific gene names. Try replacing them with pathways, biological processes, or functional categories instead.
+- Make the prompt detailed and specific enough to test deep understanding of the keypoint.
+- Use phrases like "how does", "what evidence", "which patterns", "how might" to encourage analytical thinking.
+- The prompt should be answerable based on the keypoint, context, and original prompt.
+
+Output format (strict JSON):
+{{
+  "fine_grained_prompt": "<detailed question testing understanding of this keypoint>"
+}}
+""".strip()
+
+
+def _sanitize_column_name_for_filename(col: str) -> str:
+    """Sanitize a column name for use in a filename."""
+    sanitized = re.sub(r"[^\w\s-]", "", col)
+    sanitized = re.sub(r"[-\s]+", "_", sanitized)
+    sanitized = sanitized.strip("_")
+    return sanitized if sanitized else "unknown"
+
+
+def _extract_report_source_from_filename(filepath: str) -> Optional[str]:
+    """
+    Extract report source name from breakdown JSON filename.
+
+    Examples:
+        "insights_breakdown_Discovera_gpt_4o.json" -> "Discovera_gpt_4o"
+        "output/insights_breakdown_Biomni_o4_mini.json" -> "Biomni_o4_mini"
+        "benchmark_breakdown_new.csv" -> None (CSV files don't have report source)
+
+    Returns:
+        str: Report source name, or None if not found/not applicable
+    """
+    filename = os.path.basename(filepath)
+
+    # Check if it's a JSON breakdown file
+    if filename.startswith("insights_breakdown_") and filename.endswith(".json"):
+        # Extract the part between "insights_breakdown_" and ".json"
+        report_source = filename[len("insights_breakdown_") : -len(".json")]
+        return report_source if report_source else None
+
+    return None
+
+
+def _generate_output_path_for_column(
+    report_column: str, output_base_path: Optional[str] = None
+) -> str:
+    """Generate output path for a single report column."""
+    if output_base_path:
+        return output_base_path
+
+    sanitized = _sanitize_column_name_for_filename(report_column)
+    if len(sanitized) > 100:
+        sanitized = sanitized[:100]
+    return f"output/insights_breakdown_{sanitized}.json"
+
+
+def _process_single_report_column(
+    report_column: str,
+    tasks_data: List[Dict[str, str]],
+    output_path: str,
+    llm,
+    generate_fine_grained_prompts: bool,
+) -> Dict[str, Any]:
+    """
+    Process a single report column and generate breakdown JSON.
+
+    Returns:
+        Dict[str, Any]: JSON structure with task breakdowns
+    """
+    # Load existing results if output file exists
+    json_output = {}
+    if os.path.exists(output_path):
+        try:
+            with open(output_path, "r", encoding="utf-8") as f:
+                json_output = json.load(f)
+            print(
+                f"[INFO] [{report_column}] Loaded existing results from {output_path}: {len(json_output)} tasks"
+            )
+        except Exception as e:
+            print(
+                f"[WARNING] [{report_column}] Failed to load existing results from {output_path}: {e}"
+            )
+            json_output = {}
+
+    # Process each task
+    for task_row in tqdm(tasks_data, desc=f"Processing {report_column}"):
+        task_id = task_row.get("ID", "").strip()
+        context = task_row.get("Context/Background", "").strip()
+        prompt = task_row.get("Prompt", "").strip()
+
+        if not context or not prompt:
+            print(
+                f"[WARNING] [{report_column}] Task {task_id}: Missing context or prompt, skipping"
+            )
+            continue
+
+        # Check if task already exists with complete insights
+        if task_id in json_output and json_output[task_id].get("insights"):
+            existing_insights = json_output[task_id]["insights"]
+            # Check if we need fine-grained prompts and if they're missing
+            needs_fine_grained = (
+                generate_fine_grained_prompts
+                and existing_insights
+                and "fine-grained prompt" not in existing_insights[0]
+            )
+
+            if not needs_fine_grained:
+                print(
+                    f"[INFO] [{report_column}] Task {task_id}: Using {len(existing_insights)} existing insights, skipping LLM calls"
+                )
+                continue
+            else:
+                print(
+                    f"[INFO] [{report_column}] Task {task_id}: Found {len(existing_insights)} existing insights "
+                    f"but missing fine-grained prompts, will generate them"
+                )
+                # Use existing insights and add fine-grained prompts
+                task_context = json_output[task_id].get("context", context)
+                task_prompt = json_output[task_id].get("prompt", prompt)
+
+                # Generate fine-grained prompts for existing insights
+                for insight in existing_insights:
+                    if "fine-grained prompt" in insight:
+                        continue  # Already has fine-grained prompt
+
+                    keypoint = insight.get("insight", "").strip()
+                    if not keypoint:
+                        continue
+
+                    keypoint_id = insight.get("id")
+                    fine_prompt_template = fine_grained_prompt_template(
+                        keypoint, task_context, task_prompt
+                    )
+                    try:
+                        fine_prompt_response = llm.run(
+                            fine_prompt_template, json_output=True
+                        )
+
+                        if isinstance(fine_prompt_response, dict):
+                            fine_grained_prompt = fine_prompt_response.get(
+                                "fine_grained_prompt", ""
+                            ).strip()
+                            if fine_grained_prompt:
+                                insight["fine-grained prompt"] = fine_grained_prompt
+                    except Exception as e:
+                        print(
+                            f"[ERROR] [{report_column}] Task {task_id}, Keypoint {keypoint_id}: "
+                            f"Failed to generate fine-grained prompt: {e}"
+                        )
+
+                print(
+                    f"[INFO] [{report_column}] Task {task_id}: Added fine-grained prompts to existing insights"
+                )
+                continue
+
+        # Get report text for this column
+        report_text = task_row.get(report_column, "").strip()
+        if not report_text:
+            print(f"[WARNING] [{report_column}] Task {task_id}: Empty report, skipping")
+            continue
+
+        # Step 1: Generate keypoints from report
+        keypoints_prompt = breakdown_template(report_text)
+        try:
+            keypoints_response = llm.run(keypoints_prompt, json_output=True)
+
+            if not isinstance(keypoints_response, list):
+                print(
+                    f"[WARNING] [{report_column}] Task {task_id}: "
+                    f"Expected list for keypoints, got {type(keypoints_response)}"
+                )
+                continue
+
+            if not keypoints_response:
+                print(
+                    f"[WARNING] [{report_column}] Task {task_id}: "
+                    f"No keypoints generated"
+                )
+                continue
+
+            # Initialize task structure if not exists
+            if task_id not in json_output:
+                json_output[task_id] = {
+                    "context": context,
+                    "prompt": prompt,
+                    "insights": [],
+                }
+
+            print(
+                f"[INFO] [{report_column}] Task {task_id}: "
+                f"Generated {len(keypoints_response)} keypoints"
+            )
+
+            # Step 2: Generate fine-grained prompt for each keypoint (if enabled)
+            for keypoint_item in keypoints_response:
+                keypoint_num = keypoint_item.get("keypoint_num")
+                keypoint = keypoint_item.get("keypoint", "").strip()
+
+                if not keypoint:
+                    continue
+
+                fine_grained_prompt = None
+
+                if generate_fine_grained_prompts:
+                    # Generate fine-grained prompt for this keypoint
+                    fine_prompt_template = fine_grained_prompt_template(
+                        keypoint, context, prompt
+                    )
+                    try:
+                        fine_prompt_response = llm.run(
+                            fine_prompt_template, json_output=True
+                        )
+
+                        if not isinstance(fine_prompt_response, dict):
+                            print(
+                                f"[WARNING] [{report_column}] Task {task_id}, "
+                                f"Keypoint {keypoint_num}: Expected dict for fine-grained prompt, "
+                                f"got {type(fine_prompt_response)}"
+                            )
+                            continue
+
+                        fine_grained_prompt = fine_prompt_response.get(
+                            "fine_grained_prompt", ""
+                        ).strip()
+
+                        if not fine_grained_prompt:
+                            print(
+                                f"[WARNING] [{report_column}] Task {task_id}, "
+                                f"Keypoint {keypoint_num}: Empty fine-grained prompt"
+                            )
+                            continue
+
+                    except Exception as e:
+                        print(
+                            f"[ERROR] [{report_column}] Task {task_id}, "
+                            f"Keypoint {keypoint_num}: Failed to generate fine-grained prompt: {e}"
+                        )
+                        continue
+
+                # Build insight dictionary
+                insight_dict = {
+                    "id": keypoint_num,
+                    "insight": keypoint,
+                }
+
+                if generate_fine_grained_prompts and fine_grained_prompt:
+                    insight_dict["fine-grained prompt"] = fine_grained_prompt
+
+                # Add insight to the task
+                json_output[task_id]["insights"].append(insight_dict)
+
+            completed_count = len(
+                [kp for kp in keypoints_response if kp.get("keypoint")]
+            )
+            prompt_status = (
+                "with prompts" if generate_fine_grained_prompts else "without prompts"
+            )
+            print(
+                f"[INFO] [{report_column}] Task {task_id}: "
+                f"Completed {completed_count} keypoints {prompt_status}"
+            )
+
+        except Exception as e:
+            print(
+                f"[ERROR] [{report_column}] Task {task_id}: "
+                f"Failed to generate breakdown: {e}"
+            )
+            continue
+
+    # Sort insights by id within each task
+    for task_id in json_output:
+        json_output[task_id]["insights"].sort(key=lambda x: x["id"])
+
+    # Write to JSON
+    if json_output:
+        # Sort task IDs for consistent output
+        sorted_task_ids = sorted(
+            json_output.keys(),
+            key=lambda x: (
+                float(x) if x.replace(".", "").isdigit() else float("inf"),
+                x,
+            ),
+        )
+
+        # Create ordered output dictionary
+        ordered_output = {task_id: json_output[task_id] for task_id in sorted_task_ids}
+
+        # Ensure output directory exists
+        output_dir = os.path.dirname(output_path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(ordered_output, f, indent=2, ensure_ascii=False)
+
+        total_insights = sum(
+            len(task_data["insights"]) for task_data in ordered_output.values()
+        )
+        print(
+            f"[INFO] [{report_column}] Wrote breakdown to {output_path}: "
+            f"{len(ordered_output)} tasks, {total_insights} insights"
+        )
+
+    return json_output
+
+
+def generate_insights_breakdown_from_reports(
     csv_path: str,
+    report_columns: List[str],
     provider: str = "openai",
-    model: str = "gpt-4o",
+    model: str = "gpt-5-nano",
+    output_path: Optional[str] = None,
+    task_filter: Optional[List[str]] = None,
+    generate_fine_grained_prompts: bool = True,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Generate insights breakdown from reports in benchmark_verified.csv.
+
+    Generates separate JSON files for each report column.
+
+    Args:
+        csv_path (str):
+            Path to benchmark_verified.csv containing reports.
+
+        report_columns (List[str]):
+            List of CSV column names to use as reports (e.g.,
+            ["Ground Truth", "Discovera (gpt-4o)", "Biomni (o4-mini)"])
+
+        provider (str, optional):
+            The LLM service provider to use (e.g., "openai", "anthropic").
+            Defaults to "openai".
+
+        model (str, optional):
+            The model name to use for breakdown generation.
+            Defaults to "gpt-5-nano".
+
+        output_path (Optional[str], optional):
+            Base path for output files. If None, automatically generates filenames
+            from each report column. If provided and multiple columns exist,
+            will be used as a prefix.
+            Defaults to None.
+
+        task_filter (Optional[List[str]], optional):
+            If provided, only generate breakdowns for tasks with IDs in this list.
+            Defaults to None (process all tasks).
+
+        generate_fine_grained_prompts (bool, optional):
+            If True, generate fine-grained prompts for each insight.
+            If False, only generate keypoints without fine-grained prompts.
+            Defaults to True.
+
+    Returns:
+        Dict[str, Dict[str, Any]]:
+            A dictionary mapping report column names to their JSON breakdowns.
+            Each breakdown is a dictionary with task IDs as keys, containing:
+            - "context": str - Context text
+            - "prompt": str - Original prompt
+            - "insights": List[Dict] - List of insights, each with:
+                - "id": int - Insight ID
+                - "insight": str - Insight text
+                - "fine-grained prompt": str - Fine-grained prompt (if generate_fine_grained_prompts=True)
+    """
+    llm = get_llm(provider, model, api_key=load_openai_key())
+
+    # Load CSV data
+    print(f"[INFO] Loading reports from {csv_path}...")
+    tasks_data = []
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        reader.fieldnames = [h.strip() if h else h for h in reader.fieldnames]
+        for row in reader:
+            task_id = row.get("ID", "").strip()
+            if not task_id:
+                continue
+            if task_filter and task_id not in task_filter:
+                continue
+            tasks_data.append(row)
+
+    print(f"[INFO] Found {len(tasks_data)} tasks to process")
+    print(f"[INFO] Processing {len(report_columns)} report columns: {report_columns}")
+    print(f"[INFO] Generate fine-grained prompts: {generate_fine_grained_prompts}")
+
+    start_time = time.time()
+    all_outputs = {}
+
+    # Process each report column separately
+    for report_column in report_columns:
+        # Generate output path for this column
+        if output_path:
+            # If base path provided, use its directory but generate filename from column
+            base_dir = os.path.dirname(output_path) or "output"
+            sanitized_col = _sanitize_column_name_for_filename(report_column)
+            column_output_path = os.path.join(
+                base_dir, f"insights_breakdown_{sanitized_col}.json"
+            )
+        else:
+            # Auto-generate path from column name
+            column_output_path = _generate_output_path_for_column(
+                report_column, output_path
+            )
+
+        print(f"\n{'='*60}")
+        print(f"[INFO] Processing report column: {report_column}")
+        print(f"[INFO] Output file: {column_output_path}")
+        print(f"{'='*60}")
+
+        # Process this column
+        column_output = _process_single_report_column(
+            report_column=report_column,
+            tasks_data=tasks_data,
+            output_path=column_output_path,
+            llm=llm,
+            generate_fine_grained_prompts=generate_fine_grained_prompts,
+        )
+
+        all_outputs[report_column] = column_output
+
+    elapsed = time.time() - start_time
+    total_tasks = sum(len(output) for output in all_outputs.values())
+    total_insights = sum(
+        sum(len(task_data["insights"]) for task_data in output.values())
+        for output in all_outputs.values()
+    )
+    print(f"\n{'='*60}")
+    print(
+        f"[INFO] Completed all columns in {elapsed:.2f} seconds. "
+        f"Total tasks: {total_tasks}, Total insights: {total_insights}"
+    )
+    print(f"{'='*60}")
+
+    return all_outputs
+
+
+def generate_questions_from_breakdown(
+    breakdown_path: str,
+    provider: str = "openai",
+    model: str = "gpt-5-nano",
     output_path: Optional[str] = None,
     task_filter: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Generate multiple-choice questions from benchmark breakdown CSV.
+    Generate multiple-choice questions from benchmark breakdown (CSV or JSON).
     Generates one MCQ per keypoint, batched by task (context + list of keypoints).
 
-    This function loads the benchmark breakdown CSV, groups keypoints by task_id,
+    This function loads the benchmark breakdown (CSV or JSON), groups keypoints by task_id,
     and generates questions in batches using the Context and all keypoints for
     each task.
 
     Args:
-        csv_path (str):
-            Path to the benchmark breakdown CSV file.
+        breakdown_path (str):
+            Path to the benchmark breakdown file (CSV or JSON).
+            Format is auto-detected based on file extension.
 
         provider (str, optional):
             The LLM service provider to use (e.g., "openai", "anthropic").
@@ -591,7 +1162,7 @@ def generate_questions_from_breakdown(
 
         model (str, optional):
             The model name to use for question generation.
-            Defaults to "gpt-4o".
+            Defaults to "gpt-5-nano".
 
         output_path (Optional[str], optional):
             If provided, the generated questions will also be written to this
@@ -604,7 +1175,7 @@ def generate_questions_from_breakdown(
     Returns:
         List[Dict[str, Any]]:
             A list of dictionaries, each containing:
-            - "task_id" (str): Task ID from the CSV
+            - "task_id" (str): Task ID from the breakdown
             - "question_id" (str): Keypoint number as string
             - "question_source" (str): "groundtruth"
             - "question" (str): The generated question
@@ -613,14 +1184,31 @@ def generate_questions_from_breakdown(
             - "ground_truth_keypoint" (str): The ground truth keypoint text
 
     Raises:
-        FileNotFoundError: If the CSV file does not exist.
+        FileNotFoundError: If the breakdown file does not exist.
+        ValueError: If the file format is not supported.
         RuntimeError: If the LLM call fails or response parsing fails.
     """
-    # Load benchmark breakdown data
-    tasks = load_benchmark_breakdown(csv_path)
+    # Auto-detect file format and load data
+    file_ext = os.path.splitext(breakdown_path)[1].lower()
+
+    # Extract report source from filename (for JSON files)
+    report_source = _extract_report_source_from_filename(breakdown_path)
+
+    if file_ext == ".json":
+        print(f"[INFO] Loading breakdown from JSON: {breakdown_path}")
+        if report_source:
+            print(f"[INFO] Detected report source: {report_source}")
+        tasks = load_benchmark_breakdown_json(breakdown_path)
+    elif file_ext == ".csv":
+        print(f"[INFO] Loading breakdown from CSV: {breakdown_path}")
+        tasks = load_benchmark_breakdown(breakdown_path)
+    else:
+        raise ValueError(
+            f"Unsupported file format: {file_ext}. " f"Supported formats: .csv, .json"
+        )
 
     if not tasks:
-        print(f"[WARNING] No valid tasks found in {csv_path}")
+        print(f"[WARNING] No valid tasks found in {breakdown_path}")
         return []
 
     # Filter tasks if task_filter is provided
@@ -692,12 +1280,17 @@ def generate_questions_from_breakdown(
                 question_dict = {
                     "task_id": q.get("task_id", task_id),
                     "question_id": question_id,
-                    "question_source": q.get("question_source", "groundtruth"),
+                    "question_source": (
+                        report_source
+                        if report_source
+                        else q.get("question_source", "groundtruth")
+                    ),
                     "question": q.get("question", ""),
                     "choices": q.get("choices", []),
                     "answer": q.get("answer", ""),
                     "ground_truth_keypoint": kp_data.get("keypoint", ""),
                 }
+
                 task_questions.append(question_dict)
                 all_questions.append(question_dict)
 
@@ -716,9 +1309,13 @@ def generate_questions_from_breakdown(
                 # Format model name: replace slashes with hyphens, hyphens with underscores, keep dots
                 model_name = model.replace("/", "-").replace("-", "_")
                 num_questions = len(task_questions)
-                filename = (
-                    f"qs{num_questions}_rsgroundtruth_{provider}_{model_name}.json"
-                )
+
+                # Build filename with report source if available
+                if report_source:
+                    filename = f"qs{num_questions}_{report_source}_{provider}_{model_name}.json"
+                else:
+                    filename = f"qs{num_questions}_{provider}_{model_name}.json"
+
                 file_path = os.path.join(task_output_dir, filename)
 
                 try:
@@ -801,6 +1398,12 @@ def respond_questions_from_breakdown(
             print(f"[WARNING] No question files found in {task_questions_dir}")
             continue
 
+        # Get CSV row for this task
+        csv_row = csv_data.get(task_id)
+        if not csv_row:
+            print(f"[WARNING] Task {task_id} not found in CSV")
+            continue
+
         # Process each question file
         for question_file in question_files:
             question_path = os.path.join(task_questions_dir, question_file)
@@ -817,11 +1420,18 @@ def respond_questions_from_breakdown(
                 print(f"[WARNING] Invalid questions format in {question_path}")
                 continue
 
-            # Get CSV row for this task
-            csv_row = csv_data.get(task_id)
-            if not csv_row:
-                print(f"[WARNING] Task {task_id} not found in CSV")
-                continue
+            # Extract report source from question file or questions
+            question_report_source = None
+            if questions and "question_source" in questions[0]:
+                question_report_source = questions[0].get("question_source")
+            else:
+                # Try to extract from filename (e.g., "qs10_Discovera_gpt_4o_openai_gpt_5_nano.json")
+                # Pattern: qs{num}_{report_source}_{provider}_{model}.json
+                import re
+
+                match = re.match(r"qs\d+_(.+?)_(openai|anthropic)_", question_file)
+                if match:
+                    question_report_source = match.group(1)
 
             # Answer questions using each report column
             for report_column in report_columns:
@@ -850,42 +1460,40 @@ def respond_questions_from_breakdown(
                     )
                     try:
                         response = llm.run(prompt, json_output=True)
-                        results.append(
-                            {
-                                "task_id": q.get("task_id", task_id),
-                                "question_id": q.get("question_id", ""),
-                                "question": q.get("question", ""),
-                                "question_source": q.get(
-                                    "question_source", "groundtruth"
-                                ),
-                                "choices": q.get("choices", []),
-                                "answer": q.get("answer", ""),
-                                "prediction": response.get("answer", None),
-                                "confidence": response.get("confidence", None),
-                                "report_source": source_name,
-                            }
-                        )
+                        result_dict = {
+                            "task_id": q.get("task_id", task_id),
+                            "question_id": q.get("question_id", ""),
+                            "question": q.get("question", ""),
+                            "question_source": q.get(
+                                "question_source", question_report_source
+                            ),
+                            "choices": q.get("choices", []),
+                            "answer": q.get("answer", ""),
+                            "prediction": response.get("answer", None),
+                            "confidence": response.get("confidence", None),
+                            "report_source": source_name,
+                        }
+                        results.append(result_dict)
                     except Exception as e:
                         print(
                             f"[ERROR] Failed to answer question for task "
                             f"{task_id}: {e}"
                         )
-                        results.append(
-                            {
-                                "task_id": q.get("task_id", task_id),
-                                "question_id": q.get("question_id", ""),
-                                "question": q.get("question", ""),
-                                "question_source": q.get(
-                                    "question_source", "groundtruth"
-                                ),
-                                "choices": q.get("choices", []),
-                                "answer": q.get("answer", ""),
-                                "prediction": None,
-                                "confidence": None,
-                                "report_source": source_name,
-                                "error": str(e),
-                            }
-                        )
+                        error_dict = {
+                            "task_id": q.get("task_id", task_id),
+                            "question_id": q.get("question_id", ""),
+                            "question": q.get("question", ""),
+                            "question_source": q.get(
+                                "question_source", question_report_source
+                            ),
+                            "choices": q.get("choices", []),
+                            "answer": q.get("answer", ""),
+                            "prediction": None,
+                            "confidence": None,
+                            "report_source": source_name,
+                            "error": str(e),
+                        }
+                        results.append(error_dict)
 
                 # Save results
                 if results:
@@ -893,7 +1501,7 @@ def respond_questions_from_breakdown(
                     os.makedirs(task_answers_dir, exist_ok=True)
 
                     # Extract number of questions from question filename
-                    # e.g., "qs12_rsgroundtruth_openai_gpt_5_nano.json" -> "qs12"
+                    # e.g., "qs12_Discovera_gpt_4o_openai_gpt_5_nano.json" -> "qs12"
                     qs_match = question_file.split("_")[0]  # "qs12"
                     num_questions = (
                         qs_match.replace("qs", "")
@@ -904,8 +1512,15 @@ def respond_questions_from_breakdown(
                     # Format model name
                     model_name = model.replace("/", "-").replace("-", "_")
 
-                    # Create answer filename
-                    answer_filename = f"ans{num_questions}_rs{source_name}_{provider}_{model_name}.json"
+                    # Create answer filename with report sources
+                    # Use question report source if available, otherwise use answer report source
+                    if question_report_source:
+                        # Include both question report source and answer report source
+                        answer_filename = f"ans{num_questions}_{question_report_source}_rs{source_name}_{provider}_{model_name}.json"
+                    else:
+                        # Fallback to old format
+                        answer_filename = f"ans{num_questions}_rs{source_name}_{provider}_{model_name}.json"
+
                     answer_path = os.path.join(task_answers_dir, answer_filename)
 
                     try:
@@ -1124,13 +1739,9 @@ def respond_questions_with_finegrained_reports(
                             report_data = json.load(f)
                         report_text = report_data.get("output_text", "").strip()
                     except Exception as e:
-                        print(
-                            f"[WARNING] Failed to load report {report_path}: {e}"
-                        )
+                        print(f"[WARNING] Failed to load report {report_path}: {e}")
                 else:
-                    print(
-                        f"[WARNING] Fine-grained report not found: {report_path}"
-                    )
+                    print(f"[WARNING] Fine-grained report not found: {report_path}")
 
                 # Answer question using the report
                 prompt = answer_prompt_template(
@@ -1144,9 +1755,7 @@ def respond_questions_with_finegrained_reports(
                             "task_id": q.get("task_id", task_id),
                             "question_id": question_id,
                             "question": q.get("question", ""),
-                            "question_source": q.get(
-                                "question_source", "groundtruth"
-                            ),
+                            "question_source": q.get("question_source", "groundtruth"),
                             "choices": q.get("choices", []),
                             "answer": q.get("answer", ""),
                             "prediction": response.get("answer", None),
@@ -1165,9 +1774,7 @@ def respond_questions_with_finegrained_reports(
                             "task_id": q.get("task_id", task_id),
                             "question_id": question_id,
                             "question": q.get("question", ""),
-                            "question_source": q.get(
-                                "question_source", "groundtruth"
-                            ),
+                            "question_source": q.get("question_source", "groundtruth"),
                             "choices": q.get("choices", []),
                             "answer": q.get("answer", ""),
                             "prediction": None,
@@ -1285,7 +1892,7 @@ def generate_score_comparison_table(
                         if i + 1 < len(parts):
                             provider = parts[i + 1]
                         if i + 2 < len(parts):
-                            model = "_".join(parts[i + 2:])  # Join remaining parts
+                            model = "_".join(parts[i + 2 :])  # Join remaining parts
                         break
 
                 if not report_source or not provider or not model:
@@ -1586,9 +2193,7 @@ def generate_keypoint_coverage_table(
             report_name = report_column.split("(")[0].strip()
 
             # Check coverage
-            coverage_prompt = check_coverage_prompt(
-                keypoint, report_text, report_name
-            )
+            coverage_prompt = check_coverage_prompt(keypoint, report_text, report_name)
 
             try:
                 coverage_response = llm.run(coverage_prompt, json_output=True)
