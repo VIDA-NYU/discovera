@@ -1728,18 +1728,33 @@ def create_server():
         Returns:
             Dict[str, Any]: Gene membership and annotations.
         """
-        # Validate/construct params
-        params = _validate_params(
-            {"gene_set_id": gene_set_id}, SetsInfoRummInput, "sets_info_rumm"
-        )
+        try:
+            # Validate/construct params
+            params = _validate_params(
+                {"gene_set_id": gene_set_id}, SetsInfoRummInput, "sets_info_rumm"
+            )
 
-        df = genes_query(params.gene_set_id)
-        df = _truncate_dataframe_columns(
-            df, ["symbol", "name", "summary"], MAX_CELL_CHARS_DEFAULT
-        )
-        df = _limit_dataframe_rows(df, MAX_ROWS_DEFAULT)
-        logger.info("🛠️[sets_info_rumm] Sets info fetched successfully")
-        return {"results": df.to_dict(orient="records")}
+            df = genes_query(params.gene_set_id)
+
+            # Handle None or empty DataFrame
+            if df is None or (isinstance(df, pd.DataFrame) and df.empty):
+                logger.info(
+                    "🛠️[sets_info_rumm] No genes found for gene_set_id: %s",
+                    params.gene_set_id,
+                )
+                return {"results": []}
+
+            df = _truncate_dataframe_columns(
+                df, ["symbol", "name", "summary"], MAX_CELL_CHARS_DEFAULT
+            )
+            df = _limit_dataframe_rows(df, MAX_ROWS_DEFAULT)
+            logger.info("🛠️[sets_info_rumm] Sets info fetched successfully")
+            return {"results": df.to_dict(orient="records")}
+        except Exception as e:
+            context = {
+                "gene_set_id": gene_set_id,
+            }
+            return _exception_payload("sets_info_rumm", e, context)
 
     @mcp.tool()
     async def literature_trends(
@@ -2181,7 +2196,7 @@ def create_server():
     @mcp.tool()
     async def csv_filter(
         csv_id: str,
-        conditions: List[Dict[str, Any]],
+        conditions: Optional[List[Dict[str, Any]]] = None,
         keep_columns: Optional[List[str]] = None,
         sort_by: Optional[List[str]] = None,
         distinct: Optional[bool] = None,
@@ -2191,8 +2206,10 @@ def create_server():
         Filter a stored CSV by column conditions with AND logic.
 
         Args:
-            csv_id (str): Storage id of the input CSV to filter.
-            conditions (List[Dict[str, Any]]): List of filter conditions to apply.
+            csv_id (str): Storage id of the input CSV to filter (required).
+            conditions (List[Dict[str, Any]]): List of filter conditions to apply (REQUIRED).
+                If empty or omitted, no filtering is applied (useful for just applying
+                keep_columns, sort_by, or distinct).
                 Each item accepts keys: {"column", "op", "value"} where:
                 - column (str): Column to filter on.
                 - op (str): One of "==", "!=", ">", ">=", "<", "<=", "in", "not_in",

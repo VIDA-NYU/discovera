@@ -793,7 +793,7 @@ def _process_single_report_column(
         context = task_row.get("Context/Background", "").strip()
         prompt = task_row.get("Prompt", "").strip()
 
-        if not context or not prompt:
+        if (not context or not prompt) and generate_fine_grained_prompts:
             print(
                 f"[WARNING] [{report_column}] Task {task_id}: Missing context or prompt, skipping"
             )
@@ -1010,13 +1010,14 @@ def _process_single_report_column(
 
 
 def generate_insights_breakdown_from_reports(
-    csv_path: str,
-    report_columns: List[str],
+    csv_path: Optional[str],
+    report_columns: Optional[List[str]] = None,
     provider: str = "openai",
     model: str = "gpt-5-nano",
     output_path: Optional[str] = None,
     task_filter: Optional[List[str]] = None,
     generate_fine_grained_prompts: bool = True,
+    json_reports_dirs: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Generate insights breakdown from reports in benchmark_verified.csv.
@@ -1024,10 +1025,12 @@ def generate_insights_breakdown_from_reports(
     Generates separate JSON files for each report column.
 
     Args:
-        csv_path (str):
-            Path to benchmark_verified.csv containing reports.
+        csv_path (Optional[str]):
+            Path to benchmark_verified.csv containing reports and task metadata
+            ("Context/Background" and "Prompt"). Recommended when generating
+            fine-grained prompts or when using `json_reports_dirs`.
 
-        report_columns (List[str]):
+        report_columns (Optional[List[str]]):
             List of CSV column names to use as reports (e.g.,
             ["Ground Truth", "Discovera (gpt-4o)", "Biomni (o4-mini)"])
 
@@ -1054,6 +1057,13 @@ def generate_insights_breakdown_from_reports(
             If False, only generate keypoints without fine-grained prompts.
             Defaults to True.
 
+        json_reports_dirs (Optional[Dict[str, str]], optional):
+            Optional dict mapping report names to JSON directory paths.
+            Each JSON file should contain an "output_text" key with the report.
+            Supports the same patterns as `_load_report_from_json_dir`.
+            If provided, this function will discover task IDs under each
+            directory and generate breakdowns for those tasks.
+
     Returns:
         Dict[str, Dict[str, Any]]:
             A dictionary mapping report column names to their JSON breakdowns.
@@ -1067,29 +1077,59 @@ def generate_insights_breakdown_from_reports(
     """
     llm = get_llm(provider, model, api_key=load_openai_key())
 
-    # Load CSV data
-    print(f"[INFO] Loading reports from {csv_path}...")
-    tasks_data = []
-    with open(csv_path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        reader.fieldnames = [h.strip() if h else h for h in reader.fieldnames]
-        for row in reader:
-            task_id = row.get("ID", "").strip()
-            if not task_id:
-                continue
-            if task_filter and task_id not in task_filter:
-                continue
-            tasks_data.append(row)
+    report_columns = report_columns or []
+    json_reports_dirs = json_reports_dirs or {}
 
-    print(f"[INFO] Found {len(tasks_data)} tasks to process")
-    print(f"[INFO] Processing {len(report_columns)} report columns: {report_columns}")
+    json_report_columns = list(json_reports_dirs.keys()) if json_reports_dirs else []
+    csv_report_columns = report_columns
+    all_report_columns = list(dict.fromkeys(json_report_columns + csv_report_columns))
+
+    if not all_report_columns:
+        raise ValueError("Either report_columns or json_reports_dirs must be provided")
+
+    if json_report_columns:
+        print(f"[INFO] Using JSON report columns: {json_report_columns}")
+    if csv_report_columns:
+        print(f"[INFO] Using CSV report columns: {csv_report_columns}")
+    if json_report_columns and csv_report_columns:
+        print(f"[INFO] Combined report columns: {all_report_columns}")
+
+    # Load CSV data (needed for Context/Background and Prompt, and for CSV report columns)
+    csv_rows_by_id: Dict[str, Dict[str, str]] = {}
+    tasks_data_csv: List[Dict[str, str]] = []
+    if csv_path and os.path.exists(csv_path):
+        print(f"[INFO] Loading reports from {csv_path}...")
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            reader.fieldnames = [h.strip() if h else h for h in reader.fieldnames]
+            for row in reader:
+                task_id = row.get("ID", "").strip()
+                if not task_id:
+                    continue
+                csv_rows_by_id[task_id] = row
+        # Apply task_filter for CSV-based processing
+        tasks_data_csv = [
+            row
+            for task_id, row in csv_rows_by_id.items()
+            if (not task_filter or task_id in task_filter)
+        ]
+        print(f"[INFO] Found {len(tasks_data_csv)} tasks to process from CSV")
+    elif csv_report_columns or generate_fine_grained_prompts:
+        raise FileNotFoundError(
+            "csv_path is required (and must exist) when using CSV report columns "
+            "or when generate_fine_grained_prompts=True with json_reports_dirs."
+        )
+
+    print(
+        f"[INFO] Processing {len(all_report_columns)} report columns: {all_report_columns}"
+    )
     print(f"[INFO] Generate fine-grained prompts: {generate_fine_grained_prompts}")
 
     start_time = time.time()
     all_outputs = {}
 
     # Process each report column separately
-    for report_column in report_columns:
+    for report_column in all_report_columns:
         # Generate output path for this column
         if output_path:
             # If base path provided, use its directory but generate filename from column
@@ -1108,6 +1148,36 @@ def generate_insights_breakdown_from_reports(
         print(f"[INFO] Processing report column: {report_column}")
         print(f"[INFO] Output file: {column_output_path}")
         print(f"{'='*60}")
+
+        # Choose tasks source for this column
+        tasks_data = tasks_data_csv
+        if report_column in json_reports_dirs:
+            json_dir = json_reports_dirs[report_column]
+            task_ids_in_dir = _discover_task_ids_in_json_dir(json_dir)
+            if task_filter:
+                task_ids_in_dir = [t for t in task_ids_in_dir if t in task_filter]
+
+            tasks_data = []
+            for task_id in task_ids_in_dir:
+                report_text = _load_report_from_json_dir(json_dir, task_id)
+                if not report_text:
+                    continue
+
+                csv_row = csv_rows_by_id.get(task_id, {})
+                tasks_data.append(
+                    {
+                        "ID": task_id,
+                        "Context/Background": csv_row.get(
+                            "Context/Background", ""
+                        ).strip(),
+                        "Prompt": csv_row.get("Prompt", "").strip(),
+                        report_column: report_text,
+                    }
+                )
+
+            print(
+                f"[INFO] [{report_column}] Loaded {len(tasks_data)} tasks from JSON dir: {json_dir}"
+            )
 
         # Process this column
         column_output = _process_single_report_column(
@@ -1134,6 +1204,66 @@ def generate_insights_breakdown_from_reports(
     print(f"{'='*60}")
 
     return all_outputs
+
+
+def _looks_like_task_id(task_id: str) -> bool:
+    """
+    Heuristic filter for task IDs like "1", "2.1", "10.3.2".
+    """
+    if not task_id:
+        return False
+    return bool(re.fullmatch(r"\d+(?:\.\d+)*", task_id.strip()))
+
+
+def _discover_task_ids_in_json_dir(json_dir: str) -> List[str]:
+    """
+    Discover task IDs present under a JSON reports directory.
+
+    Supports:
+    - {json_dir}/{task_id}.json
+    - {json_dir}/task_{task_id}.json
+    - {json_dir}/{task_id}/*.json
+    """
+    if not json_dir or not os.path.isdir(json_dir):
+        return []
+
+    task_ids = set()
+
+    try:
+        entries = os.listdir(json_dir)
+    except Exception:
+        return []
+
+    for entry in entries:
+        entry_path = os.path.join(json_dir, entry)
+
+        if os.path.isfile(entry_path) and entry.endswith(".json"):
+            m = re.match(r"task_(.+)\.json$", entry)
+            if m:
+                candidate = m.group(1)
+            else:
+                candidate = entry[: -len(".json")]
+            if _looks_like_task_id(candidate):
+                task_ids.add(candidate)
+
+        if os.path.isdir(entry_path):
+            if _looks_like_task_id(entry):
+                try:
+                    has_json = any(
+                        f.endswith(".json")
+                        for f in os.listdir(entry_path)
+                        if os.path.isfile(os.path.join(entry_path, f))
+                    )
+                except Exception:
+                    has_json = False
+                if has_json:
+                    task_ids.add(entry)
+
+    # Stable ordering similar to _process_single_report_column output sorting
+    return sorted(
+        task_ids,
+        key=lambda x: (float(x) if x.replace(".", "").isdigit() else float("inf"), x),
+    )
 
 
 def generate_questions_from_breakdown(
@@ -1341,45 +1471,116 @@ def generate_questions_from_breakdown(
     return all_questions
 
 
+def _load_report_from_json_dir(json_dir: str, task_id: str) -> Optional[str]:
+    """
+    Load report text from a JSON directory for a given task.
+
+    Supports multiple file naming patterns:
+    - {task_id}.json
+    - task_{task_id}.json
+    - {json_dir}/{task_id}/*.json (first JSON file found)
+
+    Args:
+        json_dir: Directory containing JSON report files
+        task_id: Task ID to load report for
+
+    Returns:
+        Report text from "output_text" key, or None if not found
+    """
+    # Try different filename patterns
+    patterns = [
+        os.path.join(json_dir, f"{task_id}.json"),
+        os.path.join(json_dir, f"task_{task_id}.json"),
+    ]
+
+    # Also try task subdirectory
+    task_subdir = os.path.join(json_dir, task_id)
+    if os.path.isdir(task_subdir):
+        json_files = [f for f in os.listdir(task_subdir) if f.endswith(".json")]
+        if json_files:
+            patterns.append(os.path.join(task_subdir, json_files[0]))
+
+    for json_path in patterns:
+        if os.path.exists(json_path):
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                report_text = data.get("output_text", "").strip()
+                if report_text:
+                    return report_text
+            except Exception as e:
+                print(f"[WARNING] Failed to load {json_path}: {e}")
+                continue
+
+    return None
+
+
 def respond_questions_from_breakdown(
     task_ids: List[str],
-    csv_path: str,
+    csv_path: Optional[str],
     questions_dir: str,
     answers_dir: str,
-    report_columns: List[str],
+    report_columns: Optional[List[str]] = None,
     provider: str = "openai",
     model: str = "gpt-4o",
+    json_reports_dirs: Optional[Dict[str, str]] = None,
 ) -> None:
     """
     Automatically traverse task IDs, load questions, and answer them using
-    reports from CSV.
+    reports from CSV or JSON directories.
 
     Args:
         task_ids: List of task IDs to process (e.g., ["1", "2.1", "3.1"])
-        csv_path: Path to benchmark_verified.csv
+        csv_path: Path to benchmark_verified.csv (optional if json_reports_dirs provided)
         questions_dir: Directory containing question JSON files
                       (e.g., "output/questions_new")
         answers_dir: Directory to save answered questions
                     (e.g., "output/answers_new")
-        report_columns: List of CSV column names to use as reports
-                       (e.g., ["Discovera (o4-mini)", "LLM (o4-mini)", "Biomni (o4-mini)"])
+        report_columns: Optional list of CSV column names for reports from CSV.
+                       Can be combined with json_reports_dirs to use both sources.
+                       (e.g., ["LLM (o4-mini)", "Biomni (o4-mini)"])
         provider: LLM provider (e.g., "openai")
         model: LLM model name (e.g., "gpt-4o")
+        json_reports_dirs: Optional dict mapping report names to JSON directory paths.
+                          Can be combined with report_columns to use both JSON and CSV sources.
+                          Each JSON file should contain an "output_text" key with the report.
+                          Format: {"Discovera": "/path/to/json/dir"}
     """
     llm = get_llm(provider, model, api_key=load_openai_key())
 
-    # Load CSV data
-    print(f"[INFO] Loading reports from {csv_path}...")
-    csv_data = {}
-    with open(csv_path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        reader.fieldnames = [h.strip() for h in reader.fieldnames]
-        for row in reader:
-            task_id = row.get("ID", "").strip()
-            if task_id:
-                csv_data[task_id] = row
+    json_reports_dirs = json_reports_dirs or {}
 
-    print(f"[INFO] Found {len(csv_data)} tasks in CSV")
+    # Combine report_columns from both json_reports_dirs and CSV report_columns
+    json_report_columns = list(json_reports_dirs.keys()) if json_reports_dirs else []
+    csv_report_columns = report_columns or []
+
+    # Merge and deduplicate report columns
+    all_report_columns = list(dict.fromkeys(json_report_columns + csv_report_columns))
+
+    if not all_report_columns:
+        raise ValueError("Either report_columns or json_reports_dirs must be provided")
+
+    if json_report_columns:
+        print(f"[INFO] Using JSON report columns: {json_report_columns}")
+    if csv_report_columns:
+        print(f"[INFO] Using CSV report columns: {csv_report_columns}")
+    if json_report_columns and csv_report_columns:
+        print(f"[INFO] Combined report columns: {all_report_columns}")
+
+    # Load CSV data (still needed for non-JSON report columns)
+    csv_data = {}
+    if csv_path and os.path.exists(csv_path):
+        print(f"[INFO] Loading reports from {csv_path}...")
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            reader.fieldnames = [h.strip() for h in reader.fieldnames]
+            for row in reader:
+                task_id = row.get("ID", "").strip()
+                if task_id:
+                    csv_data[task_id] = row
+        print(f"[INFO] Found {len(csv_data)} tasks in CSV")
+    elif not json_reports_dirs:
+        print(f"[WARNING] CSV path not found and no JSON directories provided")
 
     # Process each task ID
     for task_id in tqdm(task_ids, desc="Processing Tasks"):
@@ -1396,12 +1597,6 @@ def respond_questions_from_breakdown(
 
         if not question_files:
             print(f"[WARNING] No question files found in {task_questions_dir}")
-            continue
-
-        # Get CSV row for this task
-        csv_row = csv_data.get(task_id)
-        if not csv_row:
-            print(f"[WARNING] Task {task_id} not found in CSV")
             continue
 
         # Process each question file
@@ -1434,14 +1629,31 @@ def respond_questions_from_breakdown(
                     question_report_source = match.group(1)
 
             # Answer questions using each report column
-            for report_column in report_columns:
-                report_text = csv_row.get(report_column, "").strip()
-                if not report_text:
-                    print(
-                        f"[WARNING] Empty report for task {task_id}, "
-                        f"column {report_column}"
-                    )
-                    continue
+            for report_column in all_report_columns:
+                # Check if this report column has a JSON directory mapping
+                report_text = None
+                if report_column in json_reports_dirs:
+                    json_dir = json_reports_dirs[report_column]
+                    report_text = _load_report_from_json_dir(json_dir, task_id)
+                    if not report_text:
+                        print(
+                            f"[WARNING] No report found in JSON directory {json_dir} "
+                            f"for task {task_id}"
+                        )
+                        continue
+                else:
+                    # Load from CSV
+                    csv_row = csv_data.get(task_id)
+                    if not csv_row:
+                        print(f"[WARNING] Task {task_id} not found in CSV")
+                        continue
+                    report_text = csv_row.get(report_column, "").strip()
+                    if not report_text:
+                        print(
+                            f"[WARNING] Empty report for task {task_id}, "
+                            f"column {report_column}"
+                        )
+                        continue
 
                 # Generate source name from column name
                 # e.g., "Discovera (o4-mini)" -> "discovera(o4-mini)"

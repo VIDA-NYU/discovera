@@ -40,6 +40,7 @@ Extract mechanistic insights (keypoints) from reports in `benchmark_verified.csv
 - `output_path` (Optional[str], optional): Base directory for output files. If None, auto-generates filenames from report columns. Default: None
 - `task_filter` (Optional[List[str]], optional): List of task IDs to process. If None, processes all tasks
 - `generate_fine_grained_prompts` (bool, optional): If True, generate fine-grained prompts for each insight. If False, only generate keypoints. Default: True
+- `json_reports_dirs` (Optional[Dict[str, str]], optional): Map of report name → JSON dir containing per-task reports (each JSON must include `output_text`). If provided, tasks are discovered from these dirs and merged with any CSV-sourced reports.
 
 **Example Usage**:
 
@@ -151,6 +152,43 @@ questions = generate_questions_from_breakdown(
 
 ---
 
+## Alternative: Direct Question Generation from Reports
+
+If you want to generate MCQs directly from report text (without an insights breakdown), you can use `generate_questions` with a prompt template such as `multiple_questions_template`.
+
+### Function: `generate_questions`
+
+**Location**: `eval.prompting` (also re-exported via `eval.generate_questions`)
+
+**Parameters**:
+
+- `reports` (List[tuple]): List of `(task_id, report_text, prompt, report_source)` tuples
+- `prompt_template` (Callable): Function that formats report text into a prompt (e.g., `multiple_questions_template`)
+- `provider` (str, optional): LLM provider. Default: "openai"
+- `model` (str, optional): Model name. Default: "gpt-4o"
+- `num_questions` (int | Dict[str, int], optional): Max questions per report (or per-task overrides). Default: 20
+- `output_path` (str, optional): Directory to save generated questions
+
+**Template**: `multiple_questions_template(report_text, prompt, n)` (Location: `eval.prompting`)
+
+**Example Usage**:
+
+```python
+from eval.prompting import generate_questions, multiple_questions_template
+
+# reports: List[(task_id, report_text, prompt, report_source)]
+questions = generate_questions(
+    reports=reports,
+    prompt_template=multiple_questions_template,
+    provider="openai",
+    model="gpt-5-nano",
+    num_questions=10,
+    output_path="output/questions_direct/",
+)
+```
+
+---
+
 ## Step 2: Generate Answers
 
 Answer the generated questions using reports from different sources (Discovera, LLM, Biomni, etc.).
@@ -232,6 +270,26 @@ respond_questions_with_finegrained_reports(
     task_ids=["11.3"],  # Optional: filter specific tasks
 )
 ```
+
+---
+
+## JSON I/O Functions (Eval Playground)
+
+This list mirrors every JSON-related function used in `src/eval/eval_playground.ipynb` and their JSON inputs/outputs.
+
+**Breakdown JSON**
+- `generate_insights_breakdown_from_reports(...)` → writes `insights_breakdown_{report_source}.json`
+
+**Question JSON**
+- `generate_questions_from_breakdown(...)` → writes `qs{num}_{report_source}_{provider}_{model}.json`
+- `generate_questions(...)` (direct-from-report) → writes question JSON lists when `output_path` is set
+
+**Answer JSON**
+- `respond_questions_from_breakdown(...)` → writes `ans{num}_{question_report_source}_rs{answer_source}_{provider}_{model}.json`
+- `respond_questions_with_finegrained_reports(...)` → writes answer JSON files using per-keypoint report JSONs
+
+**Score JSON**
+- `generate_score_comparison_table(...)` → reads answer JSON files to compute accuracy tables
 
 ---
 

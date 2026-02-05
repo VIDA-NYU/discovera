@@ -303,6 +303,22 @@ def map_to_symbol(df, gene_col, cache_file=None):
     return df_merged
 
 
+def _normalize_make_unique_symbol(symbol, valid_symbols):
+    if pd.isna(symbol):
+        return pd.NA
+    sym = str(symbol).upper()
+    if sym in valid_symbols:
+        return sym
+    # Handle make.unique artifacts without a dot suffix (e.g., IGHA21 -> IGHA2).
+    if sym and sym[-1].isdigit():
+        candidate = sym
+        while candidate and candidate[-1].isdigit():
+            candidate = candidate[:-1]
+            if candidate in valid_symbols:
+                return candidate
+    return sym
+
+
 def prepare_gene_symbols(df, gene_col):
     """
     Map to human gene symbols only if necessary; otherwise, keep original symbols.
@@ -310,12 +326,20 @@ def prepare_gene_symbols(df, gene_col):
     """
     valid_symbols = get_valid_hgnc_symbols()
 
+    df = df.copy()
+    # Normalize case and fix make.unique-style suffixes when possible.
+    df[gene_col] = df[gene_col].apply(
+        lambda s: _normalize_make_unique_symbol(s, valid_symbols)
+    )
+
     # Check if input is already valid human symbols
-    input_ids = df[gene_col].dropna().astype(str).str.upper()
+    input_ids = df[gene_col].dropna().astype(str)
+    if len(input_ids) == 0:
+        df["symbol"] = pd.NA
+        return df
     n_valid = input_ids.isin(valid_symbols).sum()
     fraction_valid = n_valid / len(input_ids)
     if fraction_valid >= 0.9:  # if most IDs are valid human symbols, skip mapping
-        df = df.copy()
         df["symbol"] = input_ids
         print(
             f"Skipping mapping: {n_valid}/{len(input_ids)} IDs are valid human symbols."
@@ -526,6 +550,14 @@ def rank_gsea(
         drop=True
     )
     rnk_data = data_sorted[[hit_col, corr_col]].dropna()
+    if rnk_data.empty or len(rnk_data) < min_size:
+        warnings.warn(
+            "Not enough ranked genes after mapping to run GSEA. Skipping."
+        )
+        return pd.DataFrame()
+    rnk_data = rnk_data.copy()
+    rnk_data[hit_col] = rnk_data[hit_col].astype(str).str.upper()
+    signature_genes = set(rnk_data[hit_col])
 
     # Set index to hit_col (ONLY APPLICABLE FOR GSEApy)
     # rnk_data.set_index(hit_col, inplace=True)
@@ -534,10 +566,20 @@ def rank_gsea(
 
         for gene_set in gene_sets:
             lib = blitz.enrichr.get_library(gene_set)
+            filtered_lib = {}
+            for term, genes in lib.items():
+                genes_upper = {g.upper() for g in genes}
+                if len(signature_genes & genes_upper) >= min_size:
+                    filtered_lib[term] = list(genes_upper)
+            if not filtered_lib:
+                print(
+                    f"No gene sets with >= {min_size} overlapping genes for {gene_set}. Skipping."
+                )
+                continue
             print(f"Running GSEA for {gene_set}...")
             res = blitz.gsea(
                 signature=rnk_data,
-                library=lib,
+                library=filtered_lib,
                 min_size=min_size,
                 max_size=max_size,
             )

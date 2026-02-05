@@ -395,10 +395,11 @@ class CsvFilterInput(BaseModel):
 ID of a stored CSV entry to filter (required).
 """
     )
-    conditions: List[CsvFilterCondition] = Field(
+    conditions: Optional[List[CsvFilterCondition]] = Field(
+        default=[],
         description="""
-List of filter conditions combined with AND logic.
-"""
+List of filter conditions combined with AND logic. If empty or omitted, no filtering is applied.
+""",
     )
     keep_columns: Optional[List[str]] = Field(
         default=None,
