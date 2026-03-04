@@ -80,6 +80,9 @@ STORAGE_INDEX_PATH = os.path.join("output", "storage_index.json")
 FILE_SERVER_BASE_URL = os.getenv("FILE_SERVER_BASE_URL", "http://127.0.0.1:8001").rstrip(
     "/"
 )
+FILE_SERVER_UPLOAD_URL = os.getenv("FILE_SERVER_UPLOAD_URL", FILE_SERVER_BASE_URL).rstrip(
+    "/"
+)
 FILE_SERVER_TIMEOUT = int(os.getenv("FILE_SERVER_TIMEOUT_SECONDS", "30"))
 
 
@@ -95,7 +98,7 @@ def _upload_to_file_server(abs_path: str) -> dict | None:
         filename = os.path.basename(abs_path)
         with open(abs_path, "rb") as f:
             response = requests.post(
-                f"{FILE_SERVER_BASE_URL}/upload",
+                f"{FILE_SERVER_UPLOAD_URL}/upload",
                 files={"file": (filename, f)},
                 timeout=FILE_SERVER_TIMEOUT,
             )
