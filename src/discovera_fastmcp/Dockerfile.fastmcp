@@ -16,10 +16,11 @@ COPY src/discovera_fastmcp /app/src/discovera_fastmcp
 
 # Ensure package-style imports (src.*) resolve when running the module
 ENV PYTHONPATH=/app
+ENV FILE_SERVER_BASE_URL=http://127.0.0.1:8001
+ENV UPLOAD_SERVER_OUTPUT_DIR=/app/output
 
 EXPOSE 8000
+EXPOSE 8001
 
-# Run the FastMCP server. Requires OPENAI_API_KEY to be provided at runtime.
-CMD ["python", "-m", "src.discovera_fastmcp.server"]
-
-
+# Run upload server + FastMCP server in one container.
+CMD ["sh", "-c", "python -m src.discovera_fastmcp.upload_server & exec python -m src.discovera_fastmcp.server"]

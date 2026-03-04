@@ -19,12 +19,10 @@ from datetime import datetime
 from itertools import combinations
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
+from urllib.parse import quote
 
-import boto3
 import pandas as pd
 import requests
-from botocore.config import Config as BotoConfig
-from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError
 from dotenv import load_dotenv
 from fastmcp import Context, FastMCP
 from pydantic import ValidationError
@@ -78,76 +76,42 @@ logger = logging.getLogger("discovera_fastmcp")
 # =========================
 STORAGE_INDEX_PATH = os.path.join("output", "storage_index.json")
 
-# S3 configuration (optional)
-S3_BUCKET = os.getenv("OUTPUTS_S3_BUCKET")
-S3_PREFIX = os.getenv("OUTPUTS_S3_PREFIX", "outputs")
-S3_REGION = os.getenv("AWS_REGION", "us-east-2")
-S3_PRESIGN_TTL = int(os.getenv("S3_PRESIGN_TTL_SECONDS", "604800"))  # 7 days
-_S3_CLIENT = None
+# Local upload server configuration
+FILE_SERVER_BASE_URL = os.getenv("FILE_SERVER_BASE_URL", "http://127.0.0.1:8001").rstrip(
+    "/"
+)
+FILE_SERVER_TIMEOUT = int(os.getenv("FILE_SERVER_TIMEOUT_SECONDS", "30"))
 
 
-def _get_s3():
-    global _S3_CLIENT
-    if _S3_CLIENT is not None:
-        return _S3_CLIENT
-    if not S3_BUCKET:
-        return None
+def _file_server_download_url(filename: str) -> str:
+    return f"{FILE_SERVER_BASE_URL}/download?filename={quote(filename)}"
+
+
+def _upload_to_file_server(abs_path: str) -> dict | None:
+    """Push a local file to upload_server and return its downloadable URL."""
     try:
-        _S3_CLIENT = boto3.client(
-            "s3",
-            region_name=S3_REGION,
-            aws_access_key_id=os.getenv("AWS_ACCESS_KEY"),
-            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-            config=BotoConfig(
-                signature_version="s3v4", s3={"addressing_style": "virtual"}
-            ),
-        )
-        return _S3_CLIENT
-    except Exception:
-        return None
-
-
-def _s3_upload_and_presign(abs_path: str) -> dict | None:
-    try:
-        s3 = _get_s3()
-        if not s3 or not S3_BUCKET:
-            return None
         if not os.path.exists(abs_path):
             return None
-        # Detect content type from extension
-        ext = (os.path.splitext(abs_path)[1] or "").lower()
-        if ext == ".csv":
-            content_type = "text/csv"
-        elif ext == ".txt":
-            content_type = "text/plain"
-        elif ext == ".json":
-            content_type = "application/json"
-        elif ext == ".png":
-            content_type = "image/png"
-        elif ext == ".svg":
-            content_type = "image/svg+xml"
-        else:
-            content_type = "application/octet-stream"
-
-        # Build key with date + filename; prefix includes a date partition
-        today = datetime.now().strftime("%Y-%m-%d")
         filename = os.path.basename(abs_path)
-        s3_key = f"{S3_PREFIX}/{today}/{filename}"
         with open(abs_path, "rb") as f:
-            body = f.read()
-        s3.put_object(Bucket=S3_BUCKET, Key=s3_key, Body=body, ContentType=content_type)
-        url = s3.generate_presigned_url(
-            "get_object",
-            Params={
-                "Bucket": S3_BUCKET,
-                "Key": s3_key,
-                "ResponseContentDisposition": "inline",
-            },
-            ExpiresIn=S3_PRESIGN_TTL,
+            response = requests.post(
+                f"{FILE_SERVER_BASE_URL}/upload",
+                files={"file": (filename, f)},
+                timeout=FILE_SERVER_TIMEOUT,
+            )
+        response.raise_for_status()
+        payload: dict = response.json() if response.content else {}
+        uploaded_name = payload.get("filename") or filename
+        return {"file_server_url": _file_server_download_url(uploaded_name)}
+    except Exception as e:
+        # Fallback: still return predictable local download URL by filename.
+        logger.warning(
+            "Failed to upload %s to local upload_server (%s). Returning direct URL fallback.",
+            abs_path,
+            e,
         )
-        return {"s3_key": s3_key, "s3_presigned_url": url}
-    except (BotoCoreError, NoCredentialsError, ClientError, Exception):
-        return None
+        filename = os.path.basename(abs_path)
+        return {"file_server_url": _file_server_download_url(filename)}
 
 
 # Global CPU-bound worker pool for true parallelism
@@ -166,7 +130,8 @@ def _load_storage_index() -> list:
         return []
     try:
         with open(STORAGE_INDEX_PATH, "r", encoding="utf-8") as f:
-            return json.load(f) or []
+            data = json.load(f) or []
+            return data
     except Exception:
         return []
 
@@ -187,7 +152,7 @@ def _slugify(value: str) -> str:
 def _register_file(
     path: str,
     category: str,
-    to_s3: bool = False,
+    to_file_server: bool = False,
 ) -> dict:
     abs_path = str(Path(path).resolve())
     p = Path(abs_path)
@@ -207,12 +172,12 @@ def _register_file(
         "category": category,
     }
 
-    # Optionally upload to S3 and attach presigned URL
-    if to_s3:
+    # Optionally upload to local file server and attach download URL
+    if to_file_server:
         try:
-            s3_info = _s3_upload_and_presign(abs_path)
-            if s3_info:
-                entry["s3_presigned_url"] = s3_info.get("s3_presigned_url")
+            file_server_info = _upload_to_file_server(abs_path)
+            if file_server_info:
+                entry["file_server_url"] = file_server_info.get("file_server_url")
         except Exception:
             pass
 
@@ -225,13 +190,13 @@ def _register_file(
         if not eid:
             continue
         entries_by_id[eid] = {
-            k: e.get(k) for k in ("id", "path", "name", "category", "s3_presigned_url")
+            k: e.get(k) for k in ("id", "path", "name", "category", "file_server_url")
         }
     # Add/overwrite current entry by its unique id
     entries_by_id[entry_id] = entry
     _save_storage_index(list(entries_by_id.values()))
-    if to_s3:
-        return {k: entry.get(k) for k in ("id", "name", "path", "s3_presigned_url")}
+    if to_file_server:
+        return {k: entry.get(k) for k in ("id", "name", "path", "file_server_url")}
     else:
         return {k: entry.get(k) for k in ("id", "name", "path")}
 
@@ -264,7 +229,7 @@ def _filter_entries(
 
 def _read_file_content(entry: dict, with_content: bool, max_bytes: int) -> dict:
     # Only return minimal metadata + optional content
-    result = {k: entry.get(k) for k in ("id", "name", "path", "s3_presigned_url")}
+    result = {k: entry.get(k) for k in ("id", "name", "path", "file_server_url")}
     if not with_content:
         return result
     try:
@@ -330,7 +295,7 @@ def _save_dataframe_csv(
         entry = _register_file(
             abs_path,
             category="generated",
-            to_s3=False,
+            to_file_server=False,
         )
         # Return public/minimal info
         return {k: entry.get(k) for k in ("id", "name", "path")}
@@ -804,7 +769,7 @@ def create_server():
             try:
                 if os.path.exists(csv_path):
                     gsea_csv_metadata = _register_file(
-                        csv_path, category="generated", to_s3=True
+                        csv_path, category="generated", to_file_server=True
                     )
             except Exception:
                 pass
@@ -812,7 +777,7 @@ def create_server():
             try:
                 if os.path.exists(plot_path):
                     gsea_plot_metadata = _register_file(
-                        plot_path, category="generated", to_s3=True
+                        plot_path, category="generated", to_file_server=True
                     )
             except Exception:
                 pass
@@ -1031,7 +996,7 @@ def create_server():
             try:
                 if os.path.exists(csv_path):
                     ora_result_metadata = _register_file(
-                        csv_path, category="generated", to_s3=True
+                        csv_path, category="generated", to_file_server=True
                     )
             except Exception:
                 pass
@@ -1460,7 +1425,7 @@ def create_server():
             try:
                 if os.path.exists(csv_path):
                     gsea_csv_metadata = _register_file(
-                        csv_path, category="generated", to_s3=True
+                        csv_path, category="generated", to_file_server=True
                     )
             except Exception:
                 pass
@@ -1468,7 +1433,7 @@ def create_server():
             try:
                 if os.path.exists(plot_path):
                     gsea_plot_metadata = _register_file(
-                        plot_path, category="generated", to_s3=True
+                        plot_path, category="generated", to_file_server=True
                     )
             except Exception:
                 pass
@@ -1594,7 +1559,7 @@ def create_server():
             try:
                 if os.path.exists(csv_path):
                     ora_result_metadata = _register_file(
-                        csv_path, category="generated", to_s3=True
+                        csv_path, category="generated", to_file_server=True
                     )
             except Exception:
                 pass
@@ -1805,7 +1770,7 @@ def create_server():
         try:
             if save_path and os.path.exists(save_path):
                 literature_plot_metadata = _register_file(
-                    save_path, category="generated", to_s3=True
+                    save_path, category="generated", to_file_server=True
                 )
         except Exception:
             pass
@@ -1942,7 +1907,7 @@ def create_server():
                 return {"items": enriched}
             # Minimal fields only
             minimal = [
-                {k: e.get(k) for k in ("id", "name", "path", "s3_presigned_url")}
+                {k: e.get(k) for k in ("id", "name", "path", "file_server_url")}
                 for e in filtered
             ]
             logger.info("🛠️[storage_list] %d files found", len(minimal))
@@ -2001,7 +1966,7 @@ def create_server():
                 logger.info("🛠️[storage_get] Content read successfully")
                 return content
             logger.info("🛠️[storage_get] Returning minimal entry for %s", entry["path"])
-            return {k: entry.get(k) for k in ("id", "name", "path", "s3_presigned_url")}
+            return {k: entry.get(k) for k in ("id", "name", "path", "file_server_url")}
         except Exception as e:
             return _exception_payload("storage_get", e, {"id": params.id})
 
@@ -2135,7 +2100,7 @@ def create_server():
             if source == "csv_path":
                 metadata["csv_path"] = str(Path(params.csv_path).resolve())
 
-            entry = _register_file(abs_path, category="user_input", to_s3=False)
+            entry = _register_file(abs_path, category="user_input", to_file_server=False)
             logger.info("🛠️[csv_record] CSV file registered successfully: %s", abs_path)
             return entry
         except Exception as e:
